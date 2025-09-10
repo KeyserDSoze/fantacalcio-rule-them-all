@@ -28,10 +28,6 @@ import {
 type Player = { [key: string]: string };
 type Titolare = { [key: string]: string };
 type PlayerStatus = 'mia' | 'altra' | null;
-type PlayerPurchase = {
-  status: PlayerStatus;
-  price?: number;
-};
 
 function parseCSV(text: string): any[] {
   const [header, ...rows] = text.trim().split(/\r?\n/);

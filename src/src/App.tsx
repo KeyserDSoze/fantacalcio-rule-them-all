@@ -47,6 +47,7 @@ function App() {
   const [incroci, setIncroci] = useState<any[]>([]);
   const [incrociHeader, setIncrociHeader] = useState<string[]>([]);
   const [tiers, setTiers] = useState<any[]>([]);
+  const [infortuni, setInfortuni] = useState<any[]>([]);
   const [search, setSearch] = useState('');
   const [filtered, setFiltered] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
@@ -57,6 +58,11 @@ function App() {
   const [sortField, setSortField] = useState<string>('');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
   const [visibleColumns, setVisibleColumns] = useState<{ [key: string]: boolean }>({});
+  const [visibleSpecialColumns, setVisibleSpecialColumns] = useState<{ [key: string]: boolean }>({
+    Incroci: true,
+    Infortuni: true,
+    Stato: true
+  });
   const [columnMenuAnchor, setColumnMenuAnchor] = useState<HTMLElement | null>(null);
 
   // Carica lo stato dei giocatori dal localStorage
@@ -81,6 +87,12 @@ function App() {
         });
         setVisibleColumns(defaultColumns);
       }
+      
+      // Carica le colonne speciali
+      const savedSpecialColumns = localStorage.getItem('visibleSpecialColumns');
+      if (savedSpecialColumns) {
+        setVisibleSpecialColumns(JSON.parse(savedSpecialColumns));
+      }
     }
   }, [players]);
 
@@ -97,6 +109,13 @@ function App() {
     localStorage.setItem('visibleColumns', JSON.stringify(newVisibleColumns));
   };
 
+  // Funzione per gestire la visibilità delle colonne speciali
+  const handleSpecialColumnVisibilityChange = (column: string, visible: boolean) => {
+    const newVisibleSpecialColumns = { ...visibleSpecialColumns, [column]: visible };
+    setVisibleSpecialColumns(newVisibleSpecialColumns);
+    localStorage.setItem('visibleSpecialColumns', JSON.stringify(newVisibleSpecialColumns));
+  };
+
   // Funzione per aprire il menu delle colonne
   const handleColumnMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
     setColumnMenuAnchor(event.currentTarget);
@@ -106,8 +125,19 @@ function App() {
   const getTeamTier = (teamName: string): number => {
     const team = tiers.find(t => t.nome?.toLowerCase() === teamName?.toLowerCase());
     const tier = team ? parseInt(team.tier) : 5;
-    console.log(`Team: ${teamName}, Found tier: ${tier}`, team); // Debug
     return tier;
+  };
+
+  // Funzione per controllare se un giocatore è infortunato
+  const getPlayerInjury = (player: Player) => {
+    const injury = infortuni.find(i => 
+      i.Nome?.toLowerCase().trim() === player.Nome?.toLowerCase().trim() &&
+      i.Squadra?.toLowerCase().trim() === player.Squadra?.toLowerCase().trim()
+    );
+    return injury ? {
+      mesi: injury.Rientro_Mesi,
+      tipo: injury.Tipo_Infortunio
+    } : null;
   };
 
   // Funzione per chiudere il menu delle colonne
@@ -231,14 +261,11 @@ function App() {
         // Aggiungi statistiche per tier
         const tier = getTeamTier(player.Squadra);
         const tierIndex = Math.min(Math.max(tier - 1, 0), 4); // Converte tier 1-5 in index 0-4
-        console.log(`Player: ${player.Nome}, Team: ${player.Squadra}, Role: ${role}, Tier: ${tier}, TierIndex: ${tierIndex}`); // Debug
         roleStats[role].tiers[tierIndex]++;
         totalTiers[tierIndex]++; // Aggiungi al conteggio totale
       }
       allTeams.add(player.Squadra);
     });
-
-    console.log('Final roleStats:', roleStats); // Debug
 
     // Formatta le statistiche tier per ogni ruolo
     const formatTierStats = (tiers: number[]) => {
@@ -311,13 +338,14 @@ function App() {
       fetch(`${baseUrl}titolari_standard.csv`).then(res => res.text()).catch(() => ''),
       fetch(`${baseUrl}incroci.csv`).then(res => res.text()).catch(() => ''),
       fetch(`${baseUrl}tiers.csv`).then(res => res.text()).catch(() => ''),
+      fetch(`${baseUrl}infortuni.csv`).then(res => res.text()).catch(() => ''),
     ])
-      .then(([playersText, titolariText, incrociText, tiersText]) => {
+      .then(([playersText, titolariText, incrociText, tiersText, infortuniText]) => {
         setPlayers(parseCSV(playersText));
         setTitolari(titolariText ? parseCSV(titolariText) : []);
         const tiersData = tiersText ? parseCSV(tiersText) : [];
-        console.log('Tiers loaded:', tiersData); // Debug
         setTiers(tiersData);
+        setInfortuni(infortuniText ? parseCSV(infortuniText) : []);
         if (incrociText) {
           const [header, ...rows] = incrociText.trim().split(/\r?\n/);
           setIncrociHeader(header.split(','));
@@ -595,8 +623,15 @@ function App() {
                       </Box>
                     </TableCell>
                   ))}
-                  <TableCell sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + 2)}%` }}>Incroci</TableCell>
-                  <TableCell sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + 2)}%` }}>Stato</TableCell>
+                  {visibleSpecialColumns.Incroci && (
+                    <TableCell sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + Object.values(visibleSpecialColumns).filter(Boolean).length)}%` }}>Incroci</TableCell>
+                  )}
+                  {visibleSpecialColumns.Infortuni && (
+                    <TableCell sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + Object.values(visibleSpecialColumns).filter(Boolean).length)}%` }}>Infortuni</TableCell>
+                  )}
+                  {visibleSpecialColumns.Stato && (
+                    <TableCell sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + Object.values(visibleSpecialColumns).filter(Boolean).length)}%` }}>Stato</TableCell>
+                  )}
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -605,65 +640,110 @@ function App() {
                   const titolare = isTitolare(player);
                   const playerKey = getPlayerKey(player);
                   const status = playerStatus[playerKey];
+                  const injury = getPlayerInjury(player);
+                  
+                  // Determina il colore di sfondo della riga
+                  let rowBgColor = {};
+                  if (injury) {
+                    rowBgColor = { bgcolor: '#ffebee' }; // Sfondo rosso chiaro per infortunati
+                  } else if (titolare) {
+                    rowBgColor = { bgcolor: '#e3fcec' }; // Sfondo verde per titolari
+                  }
+                  
                   return (
-                    <TableRow key={idx} sx={titolare ? { bgcolor: '#e3fcec' } : {}}>
+                    <TableRow key={idx} sx={rowBgColor}>
                       {Object.entries(getVisiblePlayerData(player)).filter(([key]) => visibleColumns[key] !== false).map(([, val], i) => (
                         <TableCell key={i} sx={{ fontSize: 15 }}>{val}</TableCell>
                       ))}
-                      <TableCell>
-                        {minIncroci.length > 0 && (
-                          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-                            {minIncroci.map((v, i) => (
-                              <Chip
-                                key={i}
-                                label={`${v.squadra}: ${v.valore}`}
-                                size="small"
-                                sx={i === 0 ? { bgcolor: '#219653', color: 'white', fontWeight: 700 } : { bgcolor: '#f5f5f5' }}
-                              />
-                            ))}
-                          </Box>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        {status === 'mia' ? (
-                          <Chip 
-                            label="Mia squadra" 
-                            color="primary" 
-                            size="small" 
-                            onClick={() => removePlayerAssignment(playerKey)}
-                            sx={{ cursor: 'pointer' }}
-                          />
-                        ) : status === 'altra' ? (
-                          <Chip 
-                            label="Altra squadra" 
-                            color="secondary" 
-                            size="small" 
-                            onClick={() => removePlayerAssignment(playerKey)}
-                            sx={{ cursor: 'pointer' }}
-                          />
-                        ) : (
-                          <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-                            <Button 
+                      {visibleSpecialColumns.Incroci && (
+                        <TableCell>
+                          {minIncroci.length > 0 && (
+                            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                              {minIncroci.map((v, i) => (
+                                <Chip
+                                  key={i}
+                                  label={`${v.squadra}: ${v.valore}`}
+                                  size="small"
+                                  sx={i === 0 ? { bgcolor: '#219653', color: 'white', fontWeight: 700 } : { bgcolor: '#f5f5f5' }}
+                                />
+                              ))}
+                            </Box>
+                          )}
+                        </TableCell>
+                      )}
+                      {visibleSpecialColumns.Infortuni && (
+                        <TableCell>
+                          {(() => {
+                            const injury = getPlayerInjury(player);
+                            if (injury) {
+                              const getInjuryColor = (mesi: string) => {
+                                const m = parseInt(mesi);
+                                if (m === 1) return '#ff9800'; // Arancione per 1 mese
+                                if (m === 2) return '#f44336'; // Rosso per 2 mesi
+                                if (m === 3) return '#9c27b0'; // Viola per 3 mesi
+                                if (m === 4) return '#673ab7'; // Viola scuro per 4 mesi
+                                return '#424242'; // Grigio scuro per 5+ mesi
+                              };
+                              
+                              return (
+                                <Chip
+                                  label={`${injury.mesi}${injury.mesi === '5' ? '+' : ''} mesi`}
+                                  size="small"
+                                  sx={{ 
+                                    bgcolor: getInjuryColor(injury.mesi), 
+                                    color: 'white', 
+                                    fontWeight: 700 
+                                  }}
+                                  title={injury.tipo}
+                                />
+                              );
+                            }
+                            return null;
+                          })()}
+                        </TableCell>
+                      )}
+                      {visibleSpecialColumns.Stato && (
+                        <TableCell>
+                          {status === 'mia' ? (
+                            <Chip 
+                              label="Mia squadra" 
+                              color="primary" 
                               size="small" 
-                              variant="contained" 
-                              color="primary"
-                              onClick={() => assignToMyTeam(playerKey)}
-                              sx={{ fontSize: 10, minWidth: 'auto', px: 1 }}
-                            >
-                              Mia
-                            </Button>
-                            <Button 
+                              onClick={() => removePlayerAssignment(playerKey)}
+                              sx={{ cursor: 'pointer' }}
+                            />
+                          ) : status === 'altra' ? (
+                            <Chip 
+                              label="Altra squadra" 
+                              color="secondary" 
                               size="small" 
-                              variant="outlined" 
-                              color="secondary"
-                              onClick={() => assignToOtherTeam(playerKey)}
-                              sx={{ fontSize: 10, minWidth: 'auto', px: 1 }}
-                            >
-                              Altra
-                            </Button>
-                          </Box>
-                        )}
-                      </TableCell>
+                              onClick={() => removePlayerAssignment(playerKey)}
+                              sx={{ cursor: 'pointer' }}
+                            />
+                          ) : (
+                            <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                              <Button 
+                                size="small" 
+                                variant="contained" 
+                                color="primary"
+                                onClick={() => assignToMyTeam(playerKey)}
+                                sx={{ fontSize: 10, minWidth: 'auto', px: 1 }}
+                              >
+                                Mia
+                              </Button>
+                              <Button 
+                                size="small" 
+                                variant="outlined" 
+                                color="secondary"
+                                onClick={() => assignToOtherTeam(playerKey)}
+                                sx={{ fontSize: 10, minWidth: 'auto', px: 1 }}
+                              >
+                                Altra
+                              </Button>
+                            </Box>
+                          )}
+                        </TableCell>
+                      )}
                     </TableRow>
                   );
                 })}
@@ -686,6 +766,7 @@ function App() {
           }}
         >
           <List sx={{ py: 1, minWidth: 200 }}>
+            {/* Colonne dati giocatori */}
             {filtered.length > 0 && Object.keys(filtered[0]).map(column => (
               <ListItem key={column} sx={{ py: 0.5 }}>
                 <FormControlLabel
@@ -697,6 +778,32 @@ function App() {
                     />
                   }
                   label={column}
+                  sx={{ width: '100%', fontSize: 14 }}
+                />
+              </ListItem>
+            ))}
+            
+            {/* Separatore */}
+            {filtered.length > 0 && (
+              <ListItem sx={{ py: 0, borderTop: '1px solid #e0e0e0', mt: 1, pt: 1 }}>
+                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
+                  Colonne Speciali
+                </Typography>
+              </ListItem>
+            )}
+            
+            {/* Colonne speciali */}
+            {Object.keys(visibleSpecialColumns).map(specialColumn => (
+              <ListItem key={specialColumn} sx={{ py: 0.5 }}>
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      checked={visibleSpecialColumns[specialColumn]}
+                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => handleSpecialColumnVisibilityChange(specialColumn, e.target.checked)}
+                      size="small"
+                    />
+                  }
+                  label={specialColumn}
                   sx={{ width: '100%', fontSize: 14 }}
                 />
               </ListItem>

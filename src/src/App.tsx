@@ -531,7 +531,7 @@ function App() {
             <Select
               value={selectedRole}
               label="Ruolo"
-              onChange={(e) => setSelectedRole(e.target.value)}
+              onChange={(e) => setSelectedRole(e.target.value as string)}
             >
               {uniqueRoles.map(role => (
                 <MenuItem key={role} value={role}>{role}</MenuItem>
@@ -542,7 +542,7 @@ function App() {
             control={
               <Checkbox
                 checked={showOnlyFree}
-                onChange={(e) => setShowOnlyFree(e.target.checked)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setShowOnlyFree(e.target.checked)}
                 color="primary"
               />
             }
@@ -691,7 +691,7 @@ function App() {
                   control={
                     <Checkbox
                       checked={visibleColumns[column] || false}
-                      onChange={(e) => handleColumnVisibilityChange(column, e.target.checked)}
+                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => handleColumnVisibilityChange(column, e.target.checked)}
                       size="small"
                     />
                   }

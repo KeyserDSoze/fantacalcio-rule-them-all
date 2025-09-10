@@ -28,6 +28,10 @@ import {
 type Player = { [key: string]: string };
 type Titolare = { [key: string]: string };
 type PlayerStatus = 'mia' | 'altra' | null;
+type PlayerPurchase = {
+  status: PlayerStatus;
+  price?: number;
+};
 
 function parseCSV(text: string): any[] {
   const [header, ...rows] = text.trim().split(/\r?\n/);
@@ -54,8 +58,11 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [playerStatus, setPlayerStatus] = useState<{ [key: string]: PlayerStatus }>({});
+  const [playerPrices, setPlayerPrices] = useState<{ [key: string]: number }>({});
+  const [totalCredits] = useState<number>(1000);
   const [selectedRole, setSelectedRole] = useState<string>('Tutti');
   const [showOnlyFree, setShowOnlyFree] = useState<boolean>(false);
+  const [showOnlyTitolari, setShowOnlyTitolari] = useState<boolean>(false);
   const [sortField, setSortField] = useState<string>('');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
   const [visibleColumns, setVisibleColumns] = useState<{ [key: string]: boolean }>({});
@@ -72,6 +79,11 @@ function App() {
     const saved = localStorage.getItem('playerStatus');
     if (saved) {
       setPlayerStatus(JSON.parse(saved));
+    }
+    
+    const savedPrices = localStorage.getItem('playerPrices');
+    if (savedPrices) {
+      setPlayerPrices(JSON.parse(savedPrices));
     }
   }, []);
 
@@ -102,6 +114,12 @@ function App() {
   const savePlayerStatus = (newStatus: { [key: string]: PlayerStatus }) => {
     setPlayerStatus(newStatus);
     localStorage.setItem('playerStatus', JSON.stringify(newStatus));
+  };
+
+  // Salva i prezzi dei giocatori nel localStorage
+  const savePlayerPrices = (newPrices: { [key: string]: number }) => {
+    setPlayerPrices(newPrices);
+    localStorage.setItem('playerPrices', JSON.stringify(newPrices));
   };
 
   // Funzione per gestire la visibilità delle colonne
@@ -182,8 +200,14 @@ function App() {
 
   // Funzioni per assegnare giocatori
   const assignToMyTeam = (playerKey: string) => {
-    const newStatus = { ...playerStatus, [playerKey]: 'mia' as PlayerStatus };
-    savePlayerStatus(newStatus);
+    const price = prompt('Inserisci il prezzo pagato per questo giocatore:');
+    if (price !== null) {
+      const numPrice = parseInt(price) || 0;
+      const newStatus = { ...playerStatus, [playerKey]: 'mia' as PlayerStatus };
+      const newPrices = { ...playerPrices, [playerKey]: numPrice };
+      savePlayerStatus(newStatus);
+      savePlayerPrices(newPrices);
+    }
   };
 
   const assignToOtherTeam = (playerKey: string) => {
@@ -194,14 +218,18 @@ function App() {
   const removePlayerAssignment = (playerKey: string) => {
     if (window.confirm('Vuoi davvero liberare questo giocatore?')) {
       const newStatus = { ...playerStatus };
+      const newPrices = { ...playerPrices };
       delete newStatus[playerKey];
+      delete newPrices[playerKey];
       savePlayerStatus(newStatus);
+      savePlayerPrices(newPrices);
     }
   };
 
   const clearAllPlayers = () => {
     if (window.confirm('Vuoi davvero liberare TUTTI i giocatori? Questa azione non può essere annullata.')) {
       savePlayerStatus({});
+      savePlayerPrices({});
     }
   };
 
@@ -374,6 +402,44 @@ function App() {
 
   const myTeamStats = getMyTeamStats();
 
+  // Calcola le statistiche dei crediti
+  const getCreditStats = () => {
+    const myPlayers = players.filter(player => {
+      const playerKey = getPlayerKey(player);
+      return playerStatus[playerKey] === 'mia';
+    });
+
+    let totalSpent = 0;
+    const spentByRole = {
+      Portiere: 0,
+      Difensore: 0,
+      Centrocampista: 0,
+      Attaccante: 0
+    };
+
+    myPlayers.forEach(player => {
+      const playerKey = getPlayerKey(player);
+      const price = playerPrices[playerKey] || 0;
+      totalSpent += price;
+      
+      const role = player.Ruolo as keyof typeof spentByRole;
+      if (spentByRole[role] !== undefined) {
+        spentByRole[role] += price;
+      }
+    });
+
+    const remainingCredits = totalCredits - totalSpent;
+
+    return {
+      totalCredits,
+      totalSpent,
+      remainingCredits,
+      spentByRole
+    };
+  };
+
+  const creditStats = getCreditStats();
+
   // Funzione per gestire l'ordinamento
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -471,8 +537,13 @@ function App() {
       });
     }
     
+    // Applica il filtro "Solo Titolari" se attivo
+    if (showOnlyTitolari) {
+      filteredPlayers = filteredPlayers.filter(p => isTitolare(p));
+    }
+    
     setFiltered(filteredPlayers);
-  }, [search, players, selectedRole, showOnlyFree, playerStatus]);
+  }, [search, players, selectedRole, showOnlyFree, showOnlyTitolari, playerStatus]);
 
   function isTitolare(player: Player) {
     return titolari.some(
@@ -642,6 +713,72 @@ function App() {
           </Paper>
         </Box>
 
+        {/* Statistiche Crediti */}
+        <Box sx={{ display: 'flex', justifyContent: 'center', gap: 2, mb: 3, flexWrap: 'wrap' }}>
+          <Paper elevation={3} sx={{ p: 2, bgcolor: '#e8f5e8', minWidth: 150 }}>
+            <Typography variant="h6" color="success.main" sx={{ fontWeight: 700, fontSize: 16 }}>
+              Budget Totale
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {creditStats.totalCredits} crediti
+            </Typography>
+          </Paper>
+
+          <Paper elevation={3} sx={{ p: 2, bgcolor: '#fff3e0', minWidth: 150 }}>
+            <Typography variant="h6" color="warning.main" sx={{ fontWeight: 700, fontSize: 16 }}>
+              Spesi
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {creditStats.totalSpent} crediti
+            </Typography>
+          </Paper>
+
+          <Paper elevation={3} sx={{ p: 2, bgcolor: creditStats.remainingCredits < 0 ? '#ffebee' : '#e3f2fd', minWidth: 150 }}>
+            <Typography variant="h6" color={creditStats.remainingCredits < 0 ? 'error.main' : 'primary'} sx={{ fontWeight: 700, fontSize: 16 }}>
+              Rimanenti
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {creditStats.remainingCredits} crediti
+            </Typography>
+          </Paper>
+
+          <Paper elevation={3} sx={{ p: 2, bgcolor: '#f1f8e9', minWidth: 120 }}>
+            <Typography variant="h6" color="success.main" sx={{ fontWeight: 700, fontSize: 14 }}>
+              Portieri
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {creditStats.spentByRole.Portiere} crediti
+            </Typography>
+          </Paper>
+
+          <Paper elevation={3} sx={{ p: 2, bgcolor: '#e1f5fe', minWidth: 120 }}>
+            <Typography variant="h6" color="info.main" sx={{ fontWeight: 700, fontSize: 14 }}>
+              Difensori
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {creditStats.spentByRole.Difensore} crediti
+            </Typography>
+          </Paper>
+
+          <Paper elevation={3} sx={{ p: 2, bgcolor: '#fff8e1', minWidth: 120 }}>
+            <Typography variant="h6" color="warning.main" sx={{ fontWeight: 700, fontSize: 14 }}>
+              Centrocampisti
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {creditStats.spentByRole.Centrocampista} crediti
+            </Typography>
+          </Paper>
+
+          <Paper elevation={3} sx={{ p: 2, bgcolor: '#fce4ec', minWidth: 120 }}>
+            <Typography variant="h6" color="error.main" sx={{ fontWeight: 700, fontSize: 14 }}>
+              Attaccanti
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {creditStats.spentByRole.Attaccante} crediti
+            </Typography>
+          </Paper>
+        </Box>
+
         {/* Barra di ricerca e filtri */}
         <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 2, mb: 3, flexWrap: 'wrap' }}>
           <TextField
@@ -673,6 +810,17 @@ function App() {
               />
             }
             label="Solo Liberi"
+            sx={{ bgcolor: 'white', px: 1, borderRadius: 1, color: 'text.secondary' }}
+          />
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={showOnlyTitolari}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setShowOnlyTitolari(e.target.checked)}
+                color="success"
+              />
+            }
+            label="Solo Titolari"
             sx={{ bgcolor: 'white', px: 1, borderRadius: 1, color: 'text.secondary' }}
           />
           <Button
@@ -852,13 +1000,18 @@ function App() {
                       {visibleSpecialColumns.Stato && (
                         <TableCell>
                           {status === 'mia' ? (
-                            <Chip 
-                              label="Mia squadra" 
-                              color="primary" 
-                              size="small" 
-                              onClick={() => removePlayerAssignment(playerKey)}
-                              sx={{ cursor: 'pointer' }}
-                            />
+                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                              <Chip 
+                                label="Mia squadra" 
+                                color="primary" 
+                                size="small" 
+                                onClick={() => removePlayerAssignment(playerKey)}
+                                sx={{ cursor: 'pointer' }}
+                              />
+                              <Typography variant="caption" sx={{ fontSize: 10, color: 'success.main', fontWeight: 600 }}>
+                                {playerPrices[playerKey] || 0} crediti
+                              </Typography>
+                            </Box>
                           ) : status === 'altra' ? (
                             <Chip 
                               label="Altra squadra" 

@@ -48,6 +48,7 @@ function App() {
   const [incrociHeader, setIncrociHeader] = useState<string[]>([]);
   const [tiers, setTiers] = useState<any[]>([]);
   const [infortuni, setInfortuni] = useState<any[]>([]);
+  const [annoScorso, setAnnoScorso] = useState<any[]>([]);
   const [search, setSearch] = useState('');
   const [filtered, setFiltered] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,7 +62,8 @@ function App() {
   const [visibleSpecialColumns, setVisibleSpecialColumns] = useState<{ [key: string]: boolean }>({
     Incroci: true,
     Infortuni: true,
-    Stato: true
+    Stato: true,
+    AnnoScorso: true
   });
   const [columnMenuAnchor, setColumnMenuAnchor] = useState<HTMLElement | null>(null);
 
@@ -140,6 +142,28 @@ function App() {
     } : null;
   };
 
+  // Funzione per ottenere i dati dell'anno scorso di un giocatore
+  const getPlayerLastYearData = (player: Player) => {
+    const lastYearPlayer = annoScorso.find(p => 
+      p.Nome?.toLowerCase().trim() === player.Nome?.toLowerCase().trim()
+    );
+    
+    if (!lastYearPlayer) return null;
+    
+    const presenze = parseInt(lastYearPlayer.Pv) || 0;
+    const wasTitolare = presenze > 20;
+    const hasChangedTeam = lastYearPlayer.Squadra?.toLowerCase().trim() !== player.Squadra?.toLowerCase().trim();
+    
+    return {
+      wasTitolare,
+      hasChangedTeam,
+      fantamedia: lastYearPlayer.Fm || '-',
+      stats: `${lastYearPlayer.Gf || 0}/${lastYearPlayer.Ass || 0}/${lastYearPlayer.Amm || 0}/${lastYearPlayer.Esp || 0}`,
+      presenze: presenze,
+      oldTeam: lastYearPlayer.Squadra
+    };
+  };
+
   // Funzione per chiudere il menu delle colonne
   const handleColumnMenuClose = () => {
     setColumnMenuAnchor(null);
@@ -208,6 +232,15 @@ function App() {
 
     const totalTitolari = filteredTitolari.length;
     
+    // Inizializza i contatori per i tier
+    const tierStats = {
+      total: [0, 0, 0, 0, 0],      // Tier totali
+      takenByMe: [0, 0, 0, 0, 0],  // Tier presi da me
+      takenByOthers: [0, 0, 0, 0, 0], // Tier presi da altri
+      remaining: [0, 0, 0, 0, 0],   // Tier disponibili
+      totalTaken: [0, 0, 0, 0, 0]   // Tier totali presi
+    };
+    
     // Conta quanti titolari sono stati presi
     let takenByMe = 0;
     let takenByOthers = 0;
@@ -215,13 +248,42 @@ function App() {
     filteredTitolari.forEach(titolare => {
       const playerKey = `${titolare['Nome Giocatore']}_${titolare['Squadra']}`;
       const status = playerStatus[playerKey];
-      if (status === 'mia') takenByMe++;
-      else if (status === 'altra') takenByOthers++;
+      
+      // Trova il giocatore per ottenere la squadra e il tier
+      const player = players.find(p => 
+        p.Nome.toLowerCase() === titolare['Nome Giocatore']?.toLowerCase() && 
+        p.Squadra.toLowerCase() === titolare['Squadra']?.toLowerCase()
+      );
+      
+      if (player) {
+        const tier = getTeamTier(player.Squadra);
+        const tierIndex = Math.min(Math.max(tier - 1, 0), 4);
+        
+        // Incrementa il contatore totale per questo tier
+        tierStats.total[tierIndex]++;
+        
+        if (status === 'mia') {
+          takenByMe++;
+          tierStats.takenByMe[tierIndex]++;
+          tierStats.totalTaken[tierIndex]++;
+        } else if (status === 'altra') {
+          takenByOthers++;
+          tierStats.takenByOthers[tierIndex]++;
+          tierStats.totalTaken[tierIndex]++;
+        } else {
+          tierStats.remaining[tierIndex]++;
+        }
+      }
     });
 
     const totalTaken = takenByMe + takenByOthers;
     const remaining = totalTitolari - totalTaken;
     const percentageTaken = totalTitolari > 0 ? Math.round((totalTaken / totalTitolari) * 100) : 0;
+
+    // Formatta le statistiche tier
+    const formatTierStats = (tiers: number[]) => {
+      return tiers.slice(0, 4).join('/'); // Mostra solo tier 1-4
+    };
 
     return {
       totalTitolari,
@@ -229,7 +291,14 @@ function App() {
       takenByOthers,
       totalTaken,
       remaining,
-      percentageTaken
+      percentageTaken,
+      tierStats: {
+        total: formatTierStats(tierStats.total),
+        takenByMe: formatTierStats(tierStats.takenByMe),
+        takenByOthers: formatTierStats(tierStats.takenByOthers),
+        remaining: formatTierStats(tierStats.remaining),
+        totalTaken: formatTierStats(tierStats.totalTaken)
+      }
     };
   };
 
@@ -339,13 +408,15 @@ function App() {
       fetch(`${baseUrl}incroci.csv`).then(res => res.text()).catch(() => ''),
       fetch(`${baseUrl}tiers.csv`).then(res => res.text()).catch(() => ''),
       fetch(`${baseUrl}infortuni.csv`).then(res => res.text()).catch(() => ''),
+      fetch(`${baseUrl}anno_scorso_all.csv`).then(res => res.text()).catch(() => ''),
     ])
-      .then(([playersText, titolariText, incrociText, tiersText, infortuniText]) => {
+      .then(([playersText, titolariText, incrociText, tiersText, infortuniText, annoScorsoText]) => {
         setPlayers(parseCSV(playersText));
         setTitolari(titolariText ? parseCSV(titolariText) : []);
         const tiersData = tiersText ? parseCSV(tiersText) : [];
         setTiers(tiersData);
         setInfortuni(infortuniText ? parseCSV(infortuniText) : []);
+        setAnnoScorso(annoScorsoText ? parseCSV(annoScorsoText) : []);
         if (incrociText) {
           const [header, ...rows] = incrociText.trim().split(/\r?\n/);
           setIncrociHeader(header.split(','));
@@ -428,6 +499,9 @@ function App() {
             <Typography variant="body2" color="text.secondary">
               Totali: {stats.totalTitolari}
             </Typography>
+            <Typography variant="body2" color="primary.main" sx={{ fontSize: 11, fontWeight: 600 }}>
+              T1/T2/T3/T4: {stats.tierStats.total}
+            </Typography>
           </Paper>
           
           <Paper elevation={3} sx={{ p: 2, bgcolor: '#e8f5e8', minWidth: 150 }}>
@@ -436,6 +510,9 @@ function App() {
             </Typography>
             <Typography variant="body2" color="text.secondary">
               {stats.takenByMe} / {stats.totalTitolari}
+            </Typography>
+            <Typography variant="body2" color="primary.main" sx={{ fontSize: 11, fontWeight: 600 }}>
+              T1/T2/T3/T4: {stats.tierStats.takenByMe}
             </Typography>
           </Paper>
 
@@ -446,6 +523,9 @@ function App() {
             <Typography variant="body2" color="text.secondary">
               {stats.takenByOthers} / {stats.totalTitolari}
             </Typography>
+            <Typography variant="body2" color="primary.main" sx={{ fontSize: 11, fontWeight: 600 }}>
+              T1/T2/T3/T4: {stats.tierStats.takenByOthers}
+            </Typography>
           </Paper>
 
           <Paper elevation={3} sx={{ p: 2, bgcolor: '#f3e5f5', minWidth: 150 }}>
@@ -455,6 +535,9 @@ function App() {
             <Typography variant="body2" color="text.secondary">
               {stats.remaining} ({100 - stats.percentageTaken}%)
             </Typography>
+            <Typography variant="body2" color="primary.main" sx={{ fontSize: 11, fontWeight: 600 }}>
+              T1/T2/T3/T4: {stats.tierStats.remaining}
+            </Typography>
           </Paper>
 
           <Paper elevation={3} sx={{ p: 2, bgcolor: '#fce4ec', minWidth: 150 }}>
@@ -463,6 +546,9 @@ function App() {
             </Typography>
             <Typography variant="body2" color="text.secondary">
               {stats.totalTaken} ({stats.percentageTaken}%)
+            </Typography>
+            <Typography variant="body2" color="primary.main" sx={{ fontSize: 11, fontWeight: 600 }}>
+              T1/T2/T3/T4: {stats.tierStats.totalTaken}
             </Typography>
           </Paper>
         </Box>
@@ -629,6 +715,9 @@ function App() {
                   {visibleSpecialColumns.Infortuni && (
                     <TableCell sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + Object.values(visibleSpecialColumns).filter(Boolean).length)}%` }}>Infortuni</TableCell>
                   )}
+                  {visibleSpecialColumns.AnnoScorso && (
+                    <TableCell sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + Object.values(visibleSpecialColumns).filter(Boolean).length)}%` }}>Anno Scorso (g/a/y/r)</TableCell>
+                  )}
                   {visibleSpecialColumns.Stato && (
                     <TableCell sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + Object.values(visibleSpecialColumns).filter(Boolean).length)}%` }}>Stato</TableCell>
                   )}
@@ -699,6 +788,45 @@ function App() {
                               );
                             }
                             return null;
+                          })()}
+                        </TableCell>
+                      )}
+                      {visibleSpecialColumns.AnnoScorso && (
+                        <TableCell sx={(() => {
+                          const lastYearData = getPlayerLastYearData(player);
+                          if (lastYearData?.wasTitolare) {
+                            if (lastYearData.hasChangedTeam) {
+                              return { bgcolor: '#fff3e0' }; // Arancione chiaro: era titolare ma ha cambiato squadra
+                            } else {
+                              return { bgcolor: '#e8f5e8' }; // Verde chiaro: era titolare nella stessa squadra
+                            }
+                          }
+                          return {}; // Nessun background speciale
+                        })()}>
+                          {(() => {
+                            const lastYearData = getPlayerLastYearData(player);
+                            if (!lastYearData) {
+                              return <Typography variant="caption" color="text.disabled">N/D</Typography>;
+                            }
+                            
+                            return (
+                              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                                <Typography variant="caption" sx={{ fontWeight: 600, fontSize: 11 }}>
+                                  FM: {lastYearData.fantamedia}
+                                </Typography>
+                                <Typography variant="caption" sx={{ fontSize: 10 }}>
+                                  {lastYearData.stats}
+                                </Typography>
+                                {lastYearData.hasChangedTeam && (
+                                  <Typography variant="caption" sx={{ fontSize: 9, color: 'warning.main' }}>
+                                    ex {lastYearData.oldTeam}
+                                  </Typography>
+                                )}
+                                <Typography variant="caption" sx={{ fontSize: 9, color: 'text.secondary' }}>
+                                  {lastYearData.presenze} pres.
+                                </Typography>
+                              </Box>
+                            );
                           })()}
                         </TableCell>
                       )}

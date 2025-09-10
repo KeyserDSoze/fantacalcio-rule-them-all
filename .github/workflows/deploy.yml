@@ -45,6 +45,7 @@ jobs:
       - name: Build
         run: |
           cd src
+          npm install
           npm run build
           
       - name: Setup Pages

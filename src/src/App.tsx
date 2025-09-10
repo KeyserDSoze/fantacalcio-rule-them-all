@@ -154,13 +154,24 @@ function App() {
     const wasTitolare = presenze > 20;
     const hasChangedTeam = lastYearPlayer.Squadra?.toLowerCase().trim() !== player.Squadra?.toLowerCase().trim();
     
+    // Differenzia le statistiche in base al ruolo
+    let stats = '';
+    if (player.Ruolo === 'Portiere') {
+      // Per i portieri: Goal Subiti / Rigori Parati / Autogoal / Ammonizioni / Espulsioni
+      stats = `${lastYearPlayer.Gs || 0}/${lastYearPlayer.Rp || 0}/${lastYearPlayer.Au || 0}/${lastYearPlayer.Amm || 0}/${lastYearPlayer.Esp || 0}`;
+    } else {
+      // Per gli altri ruoli: Goal Fatti / Assist / Rigori + / Rigori -  / Ammonizioni / Espulsioni
+      stats = `${lastYearPlayer.Gf || 0}/${lastYearPlayer.Ass || 0}/${lastYearPlayer['R+'] || 0}/${lastYearPlayer['R-'] || 0}/${lastYearPlayer.Amm || 0}/${lastYearPlayer.Esp || 0}`;
+    }
+    
     return {
       wasTitolare,
       hasChangedTeam,
       fantamedia: lastYearPlayer.Fm || '-',
-      stats: `${lastYearPlayer.Gf || 0}/${lastYearPlayer.Ass || 0}/${lastYearPlayer.Amm || 0}/${lastYearPlayer.Esp || 0}`,
+      stats: stats,
       presenze: presenze,
-      oldTeam: lastYearPlayer.Squadra
+      oldTeam: lastYearPlayer.Squadra,
+      ruolo: player.Ruolo
     };
   };
 
@@ -716,7 +727,12 @@ function App() {
                     <TableCell sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + Object.values(visibleSpecialColumns).filter(Boolean).length)}%` }}>Infortuni</TableCell>
                   )}
                   {visibleSpecialColumns.AnnoScorso && (
-                    <TableCell sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + Object.values(visibleSpecialColumns).filter(Boolean).length)}%` }}>Anno Scorso (g/a/y/r)</TableCell>
+                    <TableCell 
+                      sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + Object.values(visibleSpecialColumns).filter(Boolean).length)}%` }}
+                      title="P: goal subiti/rigori parati/autogoal/ammonizioni/espulsioni | Altri: goal fatti/rigori/rigori sbagliati/assist/ammonizioni/espulsioni"
+                    >
+                      Anno Scorso
+                    </TableCell>
                   )}
                   {visibleSpecialColumns.Stato && (
                     <TableCell sx={{ fontWeight: 700, bgcolor: '#eafff0', width: `${100/(getVisibleColumns(filtered[0]).filter(k => visibleColumns[k] !== false).length + Object.values(visibleSpecialColumns).filter(Boolean).length)}%` }}>Stato</TableCell>
@@ -792,17 +808,20 @@ function App() {
                         </TableCell>
                       )}
                       {visibleSpecialColumns.AnnoScorso && (
-                        <TableCell sx={(() => {
-                          const lastYearData = getPlayerLastYearData(player);
-                          if (lastYearData?.wasTitolare) {
-                            if (lastYearData.hasChangedTeam) {
-                              return { bgcolor: '#fff3e0' }; // Arancione chiaro: era titolare ma ha cambiato squadra
-                            } else {
-                              return { bgcolor: '#e8f5e8' }; // Verde chiaro: era titolare nella stessa squadra
+                        <TableCell 
+                          title="P: goal subiti/rigori parati/autogoal/ammonizioni/espulsioni | Altri: goal fatti/rigori/rigori sbagliati/assist/ammonizioni/espulsioni"
+                          sx={(() => {
+                            const lastYearData = getPlayerLastYearData(player);
+                            if (lastYearData?.wasTitolare) {
+                              if (lastYearData.hasChangedTeam) {
+                                return { bgcolor: '#fff3e0' }; // Arancione chiaro: era titolare ma ha cambiato squadra
+                              } else {
+                                return { bgcolor: '#e8f5e8' }; // Verde chiaro: era titolare nella stessa squadra
+                              }
                             }
-                          }
-                          return {}; // Nessun background speciale
-                        })()}>
+                            return {}; // Nessun background speciale
+                          })()}
+                        >
                           {(() => {
                             const lastYearData = getPlayerLastYearData(player);
                             if (!lastYearData) {

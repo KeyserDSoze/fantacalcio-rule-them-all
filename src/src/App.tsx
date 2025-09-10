@@ -305,11 +305,12 @@ function App() {
   const sortedPlayers = getSortedPlayers();
 
   useEffect(() => {
+    const baseUrl = import.meta.env.BASE_URL;
     Promise.all([
-      fetch('/players_Tutti_2025-09-10 00_00.csv').then(res => res.text()),
-      fetch('/titolari_standard.csv').then(res => res.text()).catch(() => ''),
-      fetch('/incroci.csv').then(res => res.text()).catch(() => ''),
-      fetch('/tiers.csv').then(res => res.text()).catch(() => ''),
+      fetch(`${baseUrl}players_Tutti_2025-09-10 00_00.csv`).then(res => res.text()),
+      fetch(`${baseUrl}titolari_standard.csv`).then(res => res.text()).catch(() => ''),
+      fetch(`${baseUrl}incroci.csv`).then(res => res.text()).catch(() => ''),
+      fetch(`${baseUrl}tiers.csv`).then(res => res.text()).catch(() => ''),
     ])
       .then(([playersText, titolariText, incrociText, tiersText]) => {
         setPlayers(parseCSV(playersText));

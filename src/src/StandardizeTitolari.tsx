@@ -60,7 +60,7 @@ const StandardizeTitolari: React.FC = () => {
     try {
       // Carica entrambi i file CSV
       const [playersRes, titolariRes] = await Promise.all([
-        fetch('/players_Tutti_2025-09-10 00_00.csv'),
+        fetch('/players_Tutti.csv'),
         fetch('/titolari.csv'),
       ]);
       const [playersCsv, titolariCsv] = await Promise.all([

@@ -22,12 +22,27 @@ import {
   FormControlLabel,
   Popover,
   List,
-  ListItem
+  ListItem,
+  Alert,
+  CircularProgress
 } from '@mui/material';
+import { updateConfig, getGroup, getAllPlayers, getTeams, getLastYearPlayers } from './services/fantacalcioApi';
+import type { StatPlayer, Group } from './services/fantacalcioApi';
+import { db } from './firebase';
+import { doc, onSnapshot, type Unsubscribe } from 'firebase/firestore';
 
 type Player = { [key: string]: string };
 type Titolare = { [key: string]: string };
 type PlayerStatus = 'mia' | 'altra' | null;
+
+interface LiveAuction {
+  id: string;
+  currentPlayer?: string;
+  currentBid?: number;
+  currentBidder?: string;
+  status: 'waiting' | 'active' | 'sold' | 'paused';
+  timeLeft?: number;
+}
 
 function parseCSV(text: string): any[] {
   const [header, ...rows] = text.trim().split(/\r?\n/);
@@ -42,19 +57,35 @@ function parseCSV(text: string): any[] {
 }
 
 function App() {
+  // Stati per la configurazione del gruppo
+  const [groupId, setGroupId] = useState<string>('');
+  const [groupData, setGroupData] = useState<Group | null>(null);
+  const [selectedLeague, setSelectedLeague] = useState<string>('');
+  const [selectedBasket, setSelectedBasket] = useState<string>('');
+  const [selectedYear, setSelectedYear] = useState<string>('');
+  const [selectedTeam, setSelectedTeam] = useState<string>('');
+  const [configurationStep, setConfigurationStep] = useState<'group' | 'league' | 'basket' | 'year' | 'team' | 'ready'>('group');
+  const [isConfiguring, setIsConfiguring] = useState<boolean>(false);
+  const [configLoadedFromStorage, setConfigLoadedFromStorage] = useState<boolean>(false);
+  
+  // Stati esistenti
   const [players, setPlayers] = useState<Player[]>([]);
   const [titolari, setTitolari] = useState<Titolare[]>([]);
   const [incroci, setIncroci] = useState<any[]>([]);
   const [incrociHeader, setIncrociHeader] = useState<string[]>([]);
   const [tiers, setTiers] = useState<any[]>([]);
   const [infortuni, setInfortuni] = useState<any[]>([]);
-  const [annoScorso, setAnnoScorso] = useState<any[]>([]);
+  const [lastYearPlayers, setLastYearPlayers] = useState<StatPlayer[]>([]);
   const [search, setSearch] = useState('');
   const [filtered, setFiltered] = useState<Player[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [playerStatus, setPlayerStatus] = useState<{ [key: string]: PlayerStatus }>({});
-  const [playerPrices, setPlayerPrices] = useState<{ [key: string]: number }>({});
+  
+  // Stati per i dati dei team dall'API
+  const [apiTeams, setApiTeams] = useState<any[]>([]);
+  const [apiTeamsLoading, setApiTeamsLoading] = useState(false);
+  const [apiTeamsError, setApiTeamsError] = useState<string | null>(null);
+  const [lastApiTeamsUpdate, setLastApiTeamsUpdate] = useState<Date | null>(null);
   const [totalCredits] = useState<number>(1000);
   const [selectedRole, setSelectedRole] = useState<string>('Tutti');
   const [showOnlyFree, setShowOnlyFree] = useState<boolean>(false);
@@ -70,16 +101,378 @@ function App() {
   });
   const [columnMenuAnchor, setColumnMenuAnchor] = useState<HTMLElement | null>(null);
 
-  // Carica lo stato dei giocatori dal localStorage
-  useEffect(() => {
-    const saved = localStorage.getItem('playerStatus');
-    if (saved) {
-      setPlayerStatus(JSON.parse(saved));
+  // Stati per l'asta live
+  const [auctionId, setAuctionId] = useState<string>('');
+  const [liveAuction, setLiveAuction] = useState<LiveAuction | null>(null);
+  const [auctionConnected, setAuctionConnected] = useState<boolean>(false);
+  const [auctionError, setAuctionError] = useState<string | null>(null);
+
+  // Funzione per caricare i dati dei team dall'API
+  const loadApiTeams = async () => {
+    if (!groupData || !selectedLeague || !selectedBasket || !selectedYear) {
+      return;
+    }
+
+    setApiTeamsLoading(true);
+    setApiTeamsError(null);
+
+    try {
+      const teams = await getTeams();
+      setApiTeams(teams);
+      setLastApiTeamsUpdate(new Date());
+    } catch (err: any) {
+      setApiTeamsError(`Errore nel caricamento dei team: ${err.message}`);
+      console.error('Errore loadApiTeams:', err);
+    } finally {
+      setApiTeamsLoading(false);
+    }
+  };
+
+  // Funzione per ottenere lo status di un giocatore dai dati API
+  const getPlayerStatusFromApi = (player: Player): { status: PlayerStatus; price?: number; teamName?: string } => {
+    if (!apiTeams || apiTeams.length === 0) {
+      console.log('No API teams data available');
+      return { status: null };
+    }
+
+    // Debug: mostra la struttura dei dati
+    if (apiTeams.length > 0 && !(window as any).debugShown) {
+      if (apiTeams[0].players && apiTeams[0].players.length > 0) {
+      }
+      (window as any).debugShown = true;
+    }
+
+    // Cerca il giocatore in tutti i team
+    for (const team of apiTeams) {
+      if (!team.players || !Array.isArray(team.players)) {
+        continue;
+      }
+      
+      const foundPlayer = team.players.find((p: any) => {
+        // Prova diversi campi per il nome del giocatore
+        const apiPlayerName = p.name || p.playerName || p.Nome || p.nome;
+        if (!apiPlayerName) return false;
+        
+        const match = apiPlayerName.toLowerCase().trim() === player.Nome?.toLowerCase().trim();
+        if (match) {
+          console.log(`Found match: ${player.Nome} -> ${apiPlayerName} in team ${team.name || team.teamName}`);
+        }
+        return match;
+      });
+      
+      if (foundPlayer) {
+        // Se ho selezionato una squadra e questo è il mio team
+        const myTeam = selectedTeam ? apiTeams.find(t => t.owner === selectedTeam) : null;
+        const isMyTeam = myTeam && team.owner === selectedTeam;
+        
+        console.log(`Player ${player.Nome} found in team ${team.name || team.teamName}, isMyTeam: ${isMyTeam}`);
+        
+        return {
+          status: isMyTeam ? 'mia' : 'altra',
+          price: foundPlayer.price || foundPlayer.prezzo || 0,
+          teamName: team.name || team.teamName
+        };
+      }
+    }
+
+    return { status: null };
+  };
+
+  // Funzioni per l'asta live
+  const connectToAuction = (auctionIdToConnect: string) => {
+    if (!auctionIdToConnect.trim()) {
+      setAuctionError('Inserisci un ID asta valido');
+      return;
+    }
+
+    setAuctionError(null);
+    setAuctionConnected(false);
+
+    try {
+      // Crea un listener per l'asta su Firestore
+      const auctionRef = doc(db, 'aste', auctionIdToConnect.trim());
+      
+      const unsubscribe: Unsubscribe = onSnapshot(auctionRef, (docSnapshot) => {
+        if (docSnapshot.exists()) {
+          const auctionData = docSnapshot.data();
+          
+          setLiveAuction({
+            id: auctionIdToConnect,
+            currentPlayer: auctionData.currentPlayer,
+            currentBid: auctionData.currentBid,
+            currentBidder: auctionData.currentBidder,
+            status: auctionData.status || 'waiting',
+            timeLeft: auctionData.timeLeft
+          });
+          
+          setAuctionConnected(true);
+          
+          // Salva la configurazione con l'ID asta
+          if (groupData) {
+            saveConfiguration();
+          }
+        } else {
+          setAuctionError('Asta non trovata');
+          setAuctionConnected(false);
+        }
+      }, (error) => {
+        console.error('Errore nel collegamento all\'asta:', error);
+        setAuctionError(`Errore: ${error.message}`);
+        setAuctionConnected(false);
+      });
+
+      // Salva la funzione di unsubscribe per pulire quando necessario
+      return unsubscribe;
+    } catch (error: any) {
+      setAuctionError(`Errore nella connessione: ${error.message}`);
+      setAuctionConnected(false);
+    }
+  };
+
+  const disconnectFromAuction = () => {
+    setLiveAuction(null);
+    setAuctionConnected(false);
+    setAuctionError(null);
+    setAuctionId('');
+    
+    // Salva la configurazione senza ID asta
+    if (groupData) {
+      saveConfiguration();
+    }
+  };
+
+  // Funzione per ottenere i dati completi del giocatore corrente nell'asta
+  const getCurrentAuctionPlayerData = (): { player: Player; auctionData: any } | null => {
+    if (!liveAuction?.currentPlayer) return null;
+    
+    
+    // Prova diversi campi per il nome del giocatore nell'asta
+    const auctionPlayerName = liveAuction.currentPlayer;
+    
+    if (!auctionPlayerName) {
+      console.error('No player name found in auction data');
+      return null;
     }
     
-    const savedPrices = localStorage.getItem('playerPrices');
-    if (savedPrices) {
-      setPlayerPrices(JSON.parse(savedPrices));
+    const player = players.find(p => {
+      const playerName = p.Nome?.toLowerCase().trim();
+      const searchName = auctionPlayerName.toLowerCase().trim();
+      const match = playerName === searchName;
+      return match;
+    });
+    
+    if (!player) {
+      console.error('Player not found in database. Auction player:', auctionPlayerName);
+      return null;
+    }
+
+
+    // Restituisci sia i dati del giocatore che quelli dell'asta separatamente
+    return {
+      player,
+      auctionData: {
+        currentBid: liveAuction.currentBid,
+        currentBidder: liveAuction.currentBidder,
+        auctionStatus: liveAuction.status,
+        timeLeft: liveAuction.timeLeft
+      }
+    };
+  };
+
+  // Funzione per verificare se un giocatore appartiene alla squadra selezionata
+  const isPlayerInMyTeam = (player: Player) => {
+    if (!selectedTeam || !apiTeams) return false;
+    
+    const myTeam = apiTeams.find(t => t.owner === selectedTeam);
+    if (!myTeam) return false;
+    
+    return myTeam.players?.some((p: any) => 
+      p.name?.toLowerCase().trim() === player.Nome?.toLowerCase().trim()
+    ) || false;
+  };
+
+  // Funzione per ottenere i team disponibili per l'anno selezionato
+  const getAvailableTeams = () => {
+    if (!groupData || !selectedBasket || !selectedYear) return [];
+    
+    const basket = groupData.b.find(b => b.i === selectedBasket);
+    if (!basket) return [];
+    
+    const yearlyBasket = basket.y.find(y => y.y.toString() === selectedYear);
+    if (!yearlyBasket) return [];
+    
+    return yearlyBasket.t || [];
+  };
+
+  // Funzione per convertire StatPlayer a Player (formato app esistente)
+  const convertStatPlayerToPlayer = (statPlayer: StatPlayer): Player => {
+    const getRoleString = (role: number): string => {
+      switch (role) {
+        case 0: return 'Portiere';
+        case 1: return 'Difensore';
+        case 2: return 'Centrocampista';
+        case 3: return 'Attaccante';
+        default: return 'Attaccante';
+      }
+    };
+
+    return {
+      Nome: statPlayer.name,
+      Ruolo: getRoleString(statPlayer.role),
+      Squadra: statPlayer.teamName,
+      Media: statPlayer.average.toFixed(2),
+      FantaMedia: statPlayer.fantaAverage.toFixed(2),
+      'Partite >= 6': statPlayer.isEnough.toString(),
+      MotM: statPlayer.manOfTheMatch.toString(),
+      Presenze: statPlayer.withVote.toString(),
+      'Senza Voto': statPlayer.withoutVote.toString(),
+      Gialli: statPlayer.yellowCard.toString(),
+      Rossi: statPlayer.redCard.toString(),
+      Goal: statPlayer.goal.toString(),
+      Rigori: statPlayer.penalty.toString(),
+      Assist: statPlayer.assist.toString(),
+      'Rigori Sbagliati': statPlayer.wrongedPenalty.toString(),
+      Autogoal: statPlayer.ownGoal.toString(),
+      'Goal Subiti': statPlayer.sufferedGoal.toString(),
+      'Rigori Parati': statPlayer.stoppedPenalty.toString(),
+      Attivo: statPlayer.isActive ? 'true' : 'false'
+    };
+  };
+
+  // Funzione per caricare i dati del gruppo
+  const loadGroupData = async (groupIdToLoad: string) => {
+    if (!groupIdToLoad.trim()) {
+      setError('Inserisci un ID gruppo valido');
+      return;
+    }
+
+    setIsConfiguring(true);
+    setError(null);
+
+    try {
+      const group = await getGroup(groupIdToLoad.trim());
+      if (!group) {
+        setError('Gruppo non trovato. Verifica l\'ID gruppo.');
+        setIsConfiguring(false);
+        return;
+      }
+
+      setGroupData(group);
+      setConfigurationStep('league');
+    } catch (err: any) {
+      setError(`Errore nel caricamento del gruppo: ${err.message}`);
+    } finally {
+      setIsConfiguring(false);
+    }
+  };
+
+  // Funzione per caricare i giocatori una volta configurato tutto
+  const loadPlayersData = async () => {
+    if (!selectedLeague || !selectedBasket || !selectedYear) {
+      setError('Configurazione incompleta');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Configura l'API con i parametri selezionati
+      updateConfig({
+        GROUP: groupData!.i,
+        LEAGUE: selectedLeague,
+        BASKET: selectedBasket,
+        YEAR: selectedYear,
+      });
+
+      // Carica i giocatori dall'API
+      const statPlayers = await getAllPlayers();
+      const convertedPlayers = statPlayers.map(convertStatPlayerToPlayer);
+      
+      setPlayers(convertedPlayers);
+      
+      // Carica i dati dell'anno scorso dall'API
+      try {
+        const lastYearData = await getLastYearPlayers();
+        setLastYearPlayers(lastYearData);
+        console.log(`Caricati ${lastYearData.length} giocatori dell'anno scorso`);
+      } catch (lastYearError: any) {
+        console.warn('Errore nel caricamento dei dati dell\'anno scorso:', lastYearError.message);
+        // Non è un errore critico, continuiamo senza i dati dell'anno scorso
+      }
+      
+      // Carica i dati dei team
+      await loadApiTeams();
+      
+      setConfigurationStep('ready');
+      
+      // Per ora manteniamo gli altri dati vuoti o carichiamo dai CSV se necessario
+      // Potresti voler mantenere titolari, incroci, tiers, etc. dai CSV
+      loadAdditionalData();
+      
+    } catch (err: any) {
+      setError(`Errore nel caricamento dei giocatori: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Funzione per caricare dati aggiuntivi (titolari, incroci, etc.) dai CSV se necessario
+  const loadAdditionalData = async () => {
+    try {
+      const baseUrl = import.meta.env.BASE_URL;
+      const [titolariText, incrociText, tiersText, infortuniText] = await Promise.all([
+        fetch(`${baseUrl}titolari_standard.csv`).then(res => res.text()).catch(() => ''),
+        fetch(`${baseUrl}incroci.csv`).then(res => res.text()).catch(() => ''),
+        fetch(`${baseUrl}tiers.csv`).then(res => res.text()).catch(() => ''),
+        fetch(`${baseUrl}infortuni.csv`).then(res => res.text()).catch(() => ''),
+      ]);
+
+      setTitolari(titolariText ? parseCSV(titolariText) : []);
+      const tiersData = tiersText ? parseCSV(tiersText) : [];
+      setTiers(tiersData);
+      setInfortuni(infortuniText ? parseCSV(infortuniText) : []);
+      // annoScorso ora viene caricato dall'API, non più dal CSV
+      
+      if (incrociText) {
+        const [header, ...rows] = incrociText.trim().split(/\r?\n/);
+        setIncrociHeader(header.split(','));
+        setIncroci(rows.map(row => {
+          const values = row.split(',');
+          const obj: any = {};
+          header.split(',').forEach((h, i) => {
+            obj[h] = values[i];
+          });
+          return obj;
+        }));
+      }
+    } catch (error) {
+      console.warn('Errore nel caricamento dei dati aggiuntivi:', error);
+    }
+  };
+  useEffect(() => {
+    // Carica la configurazione salvata se presente
+    const savedConfig = localStorage.getItem('fantacalcioConfig');
+    if (savedConfig) {
+      const config = JSON.parse(savedConfig);
+      setGroupId(config.groupId || '');
+      setSelectedLeague(config.leagueId || '');
+      setSelectedBasket(config.basketId || '');
+      setSelectedYear(config.year || '');
+      setSelectedTeam(config.teamOwner || '');
+      setAuctionId(config.auctionId || '');
+      
+      if (config.groupId && config.leagueId && config.basketId && config.year) {
+        // Prima carica i dati del gruppo, poi configura tutto
+        loadSavedConfiguration(config);
+      }
+      
+      // Se c'è un ID asta salvato, prova a connettersi automaticamente
+      if (config.auctionId) {
+        setTimeout(() => {
+          connectToAuction(config.auctionId);
+        }, 2000); // Aspetta 2 secondi per dare tempo ai dati di caricarsi
+      }
     }
   }, []);
 
@@ -108,13 +501,11 @@ function App() {
 
   // Salva lo stato dei giocatori nel localStorage
   const savePlayerStatus = (newStatus: { [key: string]: PlayerStatus }) => {
-    setPlayerStatus(newStatus);
     localStorage.setItem('playerStatus', JSON.stringify(newStatus));
   };
 
   // Salva i prezzi dei giocatori nel localStorage
   const savePlayerPrices = (newPrices: { [key: string]: number }) => {
-    setPlayerPrices(newPrices);
     localStorage.setItem('playerPrices', JSON.stringify(newPrices));
   };
 
@@ -158,33 +549,34 @@ function App() {
 
   // Funzione per ottenere i dati dell'anno scorso di un giocatore
   const getPlayerLastYearData = (player: Player) => {
-    const lastYearPlayer = annoScorso.find(p => 
-      p.Nome?.toLowerCase().trim() === player.Nome?.toLowerCase().trim()
+    // Cerca il giocatore nei dati dell'anno scorso dall'API
+    const lastYearPlayer = lastYearPlayers.find(p => 
+      p.name?.toLowerCase().trim() === player.Nome?.toLowerCase().trim()
     );
     
     if (!lastYearPlayer) return null;
     
-    const presenze = parseInt(lastYearPlayer.Pv) || 0;
+    const presenze = lastYearPlayer.withVote;
     const wasTitolare = presenze > 20;
-    const hasChangedTeam = lastYearPlayer.Squadra?.toLowerCase().trim() !== player.Squadra?.toLowerCase().trim();
+    const hasChangedTeam = lastYearPlayer.teamName?.toLowerCase().trim() !== player.Squadra?.toLowerCase().trim();
     
     // Differenzia le statistiche in base al ruolo
     let stats = '';
     if (player.Ruolo === 'Portiere') {
       // Per i portieri: Goal Subiti / Rigori Parati / Autogoal / Ammonizioni / Espulsioni
-      stats = `${lastYearPlayer.Gs || 0}/${lastYearPlayer.Rp || 0}/${lastYearPlayer.Au || 0}/${lastYearPlayer.Amm || 0}/${lastYearPlayer.Esp || 0}`;
+      stats = `${lastYearPlayer.sufferedGoal || 0}/${lastYearPlayer.stoppedPenalty || 0}/${lastYearPlayer.ownGoal || 0}/${lastYearPlayer.yellowCard || 0}/${lastYearPlayer.redCard || 0}`;
     } else {
-      // Per gli altri ruoli: Goal Fatti / Assist / Rigori + / Rigori -  / Ammonizioni / Espulsioni
-      stats = `${lastYearPlayer.Gf || 0}/${lastYearPlayer.Ass || 0}/${lastYearPlayer['R+'] || 0}/${lastYearPlayer['R-'] || 0}/${lastYearPlayer.Amm || 0}/${lastYearPlayer.Esp || 0}`;
+      // Per gli altri ruoli: Goal Fatti / Assist / Rigori + / Rigori - / Ammonizioni / Espulsioni
+      stats = `${lastYearPlayer.goal || 0}/${lastYearPlayer.assist || 0}/${lastYearPlayer.penalty || 0}/${lastYearPlayer.wrongedPenalty || 0}/${lastYearPlayer.yellowCard || 0}/${lastYearPlayer.redCard || 0}`;
     }
     
     return {
       wasTitolare,
       hasChangedTeam,
-      fantamedia: lastYearPlayer.Fm || '-',
+      fantamedia: lastYearPlayer.fantaAverage ? lastYearPlayer.fantaAverage.toFixed(2) : '-',
       stats: stats,
       presenze: presenze,
-      oldTeam: lastYearPlayer.Squadra,
+      oldTeam: lastYearPlayer.teamName,
       ruolo: player.Ruolo
     };
   };
@@ -194,42 +586,12 @@ function App() {
     setColumnMenuAnchor(null);
   };
 
-  // Funzioni per assegnare giocatori
-  const assignToMyTeam = (playerKey: string) => {
-    const price = prompt('Inserisci il prezzo pagato per questo giocatore:');
-    if (price !== null) {
-      const numPrice = parseInt(price) || 0;
-      const newStatus = { ...playerStatus, [playerKey]: 'mia' as PlayerStatus };
-      const newPrices = { ...playerPrices, [playerKey]: numPrice };
-      savePlayerStatus(newStatus);
-      savePlayerPrices(newPrices);
-    }
-  };
-
-  const assignToOtherTeam = (playerKey: string) => {
-    const newStatus = { ...playerStatus, [playerKey]: 'altra' as PlayerStatus };
-    savePlayerStatus(newStatus);
-  };
-
-  const removePlayerAssignment = (playerKey: string) => {
-    if (window.confirm('Vuoi davvero liberare questo giocatore?')) {
-      const newStatus = { ...playerStatus };
-      const newPrices = { ...playerPrices };
-      delete newStatus[playerKey];
-      delete newPrices[playerKey];
-      savePlayerStatus(newStatus);
-      savePlayerPrices(newPrices);
-    }
-  };
-
   const clearAllPlayers = () => {
     if (window.confirm('Vuoi davvero liberare TUTTI i giocatori? Questa azione non può essere annullata.')) {
       savePlayerStatus({});
       savePlayerPrices({});
     }
   };
-
-  const getPlayerKey = (player: Player) => `${player.Nome}_${player.Squadra}`;
 
   // Colonne da nascondere
   const hiddenColumns = ['Attivo'];
@@ -281,9 +643,6 @@ function App() {
     let takenByOthers = 0;
     
     filteredTitolari.forEach(titolare => {
-      const playerKey = `${titolare['Nome Giocatore']}_${titolare['Squadra']}`;
-      const status = playerStatus[playerKey];
-      
       // Trova il giocatore per ottenere la squadra e il tier
       const player = players.find(p => 
         p.Nome.toLowerCase() === titolare['Nome Giocatore']?.toLowerCase() && 
@@ -291,6 +650,9 @@ function App() {
       );
       
       if (player) {
+        // Usa l'API per ottenere lo status invece del localStorage
+        const apiStatus = getPlayerStatusFromApi(player);
+        const status = apiStatus.status;
         const tier = getTeamTier(player.Squadra);
         const tierIndex = Math.min(Math.max(tier - 1, 0), 4);
         
@@ -342,8 +704,9 @@ function App() {
   // Calcola le statistiche dei giocatori presi da me
   const getMyTeamStats = () => {
     const myPlayers = players.filter(player => {
-      const playerKey = getPlayerKey(player);
-      return playerStatus[playerKey] === 'mia';
+      // Usa l'API per ottenere lo status invece del localStorage
+      const apiStatus = getPlayerStatusFromApi(player);
+      return apiStatus.status === 'mia';
     });
 
     const roleStats = {
@@ -401,8 +764,9 @@ function App() {
   // Calcola le statistiche dei crediti
   const getCreditStats = () => {
     const myPlayers = players.filter(player => {
-      const playerKey = getPlayerKey(player);
-      return playerStatus[playerKey] === 'mia';
+      // Usa l'API per ottenere lo status invece del localStorage
+      const apiStatus = getPlayerStatusFromApi(player);
+      return apiStatus.status === 'mia';
     });
 
     let totalSpent = 0;
@@ -414,8 +778,9 @@ function App() {
     };
 
     myPlayers.forEach(player => {
-      const playerKey = getPlayerKey(player);
-      const price = playerPrices[playerKey] || 0;
+      // Usa il prezzo dall'API invece che dal localStorage
+      const apiStatus = getPlayerStatusFromApi(player);
+      const price = apiStatus.price || 0;
       totalSpent += price;
       
       const role = player.Ruolo as keyof typeof spentByRole;
@@ -473,42 +838,72 @@ function App() {
 
   const sortedPlayers = getSortedPlayers();
 
-  useEffect(() => {
-    const baseUrl = import.meta.env.BASE_URL;
-    Promise.all([
-      fetch(`${baseUrl}players_Tutti_2025-09-10 00_00.csv`).then(res => res.text()),
-      fetch(`${baseUrl}titolari_standard.csv`).then(res => res.text()).catch(() => ''),
-      fetch(`${baseUrl}incroci.csv`).then(res => res.text()).catch(() => ''),
-      fetch(`${baseUrl}tiers.csv`).then(res => res.text()).catch(() => ''),
-      fetch(`${baseUrl}infortuni.csv`).then(res => res.text()).catch(() => ''),
-      fetch(`${baseUrl}anno_scorso_all.csv`).then(res => res.text()).catch(() => ''),
-    ])
-      .then(([playersText, titolariText, incrociText, tiersText, infortuniText, annoScorsoText]) => {
-        setPlayers(parseCSV(playersText));
-        setTitolari(titolariText ? parseCSV(titolariText) : []);
-        const tiersData = tiersText ? parseCSV(tiersText) : [];
-        setTiers(tiersData);
-        setInfortuni(infortuniText ? parseCSV(infortuniText) : []);
-        setAnnoScorso(annoScorsoText ? parseCSV(annoScorsoText) : []);
-        if (incrociText) {
-          const [header, ...rows] = incrociText.trim().split(/\r?\n/);
-          setIncrociHeader(header.split(','));
-          setIncroci(rows.map(row => {
-            const values = row.split(',');
-            const obj: any = {};
-            header.split(',').forEach((h, i) => {
-              obj[h] = values[i];
-            });
-            return obj;
-          }));
-        }
-        setLoading(false);
-      })
-      .catch(() => {
-        setError('Errore nel caricamento dei file CSV');
-        setLoading(false);
+  // Funzione per salvare la configurazione
+  const saveConfiguration = () => {
+    const config = {
+      groupId: groupData!.i,
+      leagueId: selectedLeague,
+      basketId: selectedBasket,
+      year: selectedYear,
+      teamOwner: selectedTeam,
+      auctionId: auctionId
+    };
+    localStorage.setItem('fantacalcioConfig', JSON.stringify(config));
+  };
+
+  // Funzione per caricare una configurazione salvata
+  const loadSavedConfiguration = async (config: any) => {
+    try {
+      setIsConfiguring(true);
+      
+      // Prima carica i dati del gruppo
+      const group = await getGroup(config.groupId);
+      if (!group) {
+        setError('Gruppo salvato non trovato. Riconfigura l\'applicazione.');
+        setConfigurationStep('group');
+        localStorage.removeItem('fantacalcioConfig');
+        return;
+      }
+
+      setGroupData(group);
+      setSelectedTeam(config.teamOwner || '');
+      
+      // Configura l'API
+      updateConfig({
+        GROUP: config.groupId,
+        LEAGUE: config.leagueId,
+        BASKET: config.basketId,
+        YEAR: config.year,
       });
-  }, []);
+
+      // Carica i giocatori
+      const statPlayers = await getAllPlayers();
+      const convertedPlayers = statPlayers.map(convertStatPlayerToPlayer);
+      setPlayers(convertedPlayers);
+      
+      // Carica i dati dei team
+      await loadApiTeams();
+      
+      // Carica dati aggiuntivi
+      await loadAdditionalData();
+      
+      setConfigurationStep('ready');
+      setError(null);
+      setConfigLoadedFromStorage(true);
+      
+      // Nascondi il messaggio dopo 5 secondi
+      setTimeout(() => {
+        setConfigLoadedFromStorage(false);
+      }, 5000);
+      
+    } catch (err: any) {
+      setError(`Errore nel caricamento della configurazione salvata: ${err.message}`);
+      setConfigurationStep('group');
+      localStorage.removeItem('fantacalcioConfig');
+    } finally {
+      setIsConfiguring(false);
+    }
+  };
 
   useEffect(() => {
     let filteredPlayers = players;
@@ -528,8 +923,9 @@ function App() {
     // Applica il filtro "Solo Liberi" se attivo
     if (showOnlyFree) {
       filteredPlayers = filteredPlayers.filter(p => {
-        const playerKey = getPlayerKey(p);
-        return !playerStatus[playerKey]; // Non assegnato (né 'mia' né 'altra')
+        // Usa l'API per controllare se il giocatore è libero
+        const apiStatus = getPlayerStatusFromApi(p);
+        return apiStatus.status === null; // Non assegnato
       });
     }
     
@@ -539,7 +935,7 @@ function App() {
     }
     
     setFiltered(filteredPlayers);
-  }, [search, players, selectedRole, showOnlyFree, showOnlyTitolari, playerStatus]);
+  }, [search, players, selectedRole, showOnlyFree, showOnlyTitolari, apiTeams]); // Cambiato playerStatus con apiTeams
 
   function isTitolare(player: Player) {
     return titolari.some(
@@ -567,7 +963,298 @@ function App() {
 
   return (
     <Box sx={{ bgcolor: '#f5f5f5ff', minHeight: '80vh', width: '100%'  }}>
-      <Box sx={{ width: '100%', margin: 0, padding: 0 }}>
+      {/* Interfaccia di Configurazione */}
+      {configurationStep !== 'ready' && (
+        <Box sx={{ width: '100%', p: 3 }}>
+          <Paper elevation={3} sx={{ p: 3, mb: 3 }}>
+            <Typography variant="h5" gutterBottom color="primary">
+              Configurazione Fantacalcio
+            </Typography>
+            
+            {/* Indicatore di caricamento configurazione salvata */}
+            {isConfiguring && (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3, p: 2, bgcolor: 'info.main', color: 'white', borderRadius: 1 }}>
+                <CircularProgress size={20} color="inherit" />
+                <Typography>
+                  Caricamento configurazione salvata...
+                </Typography>
+              </Box>
+            )}
+            
+            {/* Step 1: Inserimento GUID */}
+            {configurationStep === 'group' && !isConfiguring && (
+              <Box>
+                <Typography variant="h6" gutterBottom>
+                  1. Inserisci l'ID del Gruppo
+                </Typography>
+                <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', mb: 2 }}>
+                  <TextField
+                    label="ID Gruppo"
+                    value={groupId}
+                    onChange={(e) => setGroupId(e.target.value)}
+                    placeholder="es: abc123-def456-ghi789"
+                    sx={{ flex: 1 }}
+                  />
+                  <Button
+                    variant="contained"
+                    onClick={() => loadGroupData(groupId)}
+                    disabled={!groupId.trim() || isConfiguring}
+                  >
+                    {isConfiguring ? <CircularProgress size={20} /> : 'Carica Gruppo'}
+                  </Button>
+                </Box>
+              </Box>
+            )}
+
+            {/* Step 2: Selezione League */}
+            {configurationStep === 'league' && groupData && (
+              <Box>
+                <Typography variant="h6" gutterBottom>
+                  2. Seleziona la Lega
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  Gruppo: <strong>{groupData.n}</strong>
+                </Typography>
+                <FormControl fullWidth sx={{ mb: 2 }}>
+                  <InputLabel>Lega</InputLabel>
+                  <Select
+                    value={selectedLeague}
+                    onChange={(e) => setSelectedLeague(e.target.value)}
+                    label="Lega"
+                  >
+                    {groupData.l.map((league) => (
+                      <MenuItem key={league.i} value={league.i}>
+                        {league.n} {league.m ? '(Principale)' : ''}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <Button
+                  variant="contained"
+                  onClick={() => setConfigurationStep('basket')}
+                  disabled={!selectedLeague}
+                >
+                  Continua
+                </Button>
+              </Box>
+            )}
+
+            {/* Step 3: Selezione Basket */}
+            {configurationStep === 'basket' && groupData && (
+              <Box>
+                <Typography variant="h6" gutterBottom>
+                  3. Seleziona il Basket
+                </Typography>
+                <FormControl fullWidth sx={{ mb: 2 }}>
+                  <InputLabel>Basket</InputLabel>
+                  <Select
+                    value={selectedBasket}
+                    onChange={(e) => setSelectedBasket(e.target.value)}
+                    label="Basket"
+                  >
+                    {groupData.b.map((basket) => (
+                      <MenuItem key={basket.i} value={basket.i}>
+                        {basket.n}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <Button
+                  variant="contained"
+                  onClick={() => setConfigurationStep('year')}
+                  disabled={!selectedBasket}
+                >
+                  Continua
+                </Button>
+              </Box>
+            )}
+
+            {/* Step 4: Selezione Anno */}
+            {configurationStep === 'year' && groupData && (
+              <Box>
+                <Typography variant="h6" gutterBottom>
+                  4. Seleziona l'Anno
+                </Typography>
+                <FormControl fullWidth sx={{ mb: 2 }}>
+                  <InputLabel>Anno</InputLabel>
+                  <Select
+                    value={selectedYear}
+                    onChange={(e) => setSelectedYear(e.target.value)}
+                    label="Anno"
+                  >
+                    {groupData.l
+                      .find(l => l.i === selectedLeague)?.y
+                      ?.map((year) => (
+                        <MenuItem key={year.y} value={year.y.toString()}>
+                          {year.y}
+                        </MenuItem>
+                      )) || []}
+                  </Select>
+                </FormControl>
+                <Button
+                  variant="contained"
+                  onClick={() => setConfigurationStep('team')}
+                  disabled={!selectedYear}
+                >
+                  Continua
+                </Button>
+              </Box>
+            )}
+
+            {/* Step 5: Selezione Team */}
+            {configurationStep === 'team' && groupData && (
+              <Box>
+                <Typography variant="h6" gutterBottom>
+                  5. Seleziona la tua Squadra
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  Seleziona la squadra che vuoi gestire (opzionale - puoi anche non selezionare nessuna squadra)
+                </Typography>
+                <FormControl fullWidth sx={{ mb: 2 }}>
+                  <InputLabel>La mia Squadra</InputLabel>
+                  <Select
+                    value={selectedTeam}
+                    onChange={(e) => setSelectedTeam(e.target.value)}
+                    label="La mia Squadra"
+                  >
+                    <MenuItem value="">
+                      <em>Nessuna squadra selezionata</em>
+                    </MenuItem>
+                    {getAvailableTeams().map((team) => (
+                      <MenuItem key={team.o} value={team.o}>
+                        {team.n} ({team.o})
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <Button
+                  variant="contained"
+                  onClick={() => {
+                    saveConfiguration();
+                    loadPlayersData();
+                  }}
+                  disabled={loading}
+                >
+                  {loading ? <CircularProgress size={20} /> : 'Carica Giocatori'}
+                </Button>
+              </Box>
+            )}
+
+            {error && (
+              <Alert severity="error" sx={{ mt: 2 }}>
+                {error}
+              </Alert>
+            )}
+          </Paper>
+        </Box>
+      )}
+
+      {/* Contenuto principale - visibile solo dopo configurazione */}
+      {configurationStep === 'ready' && (
+        <Box sx={{ width: '100%', margin: 0, padding: 0 }}>
+          {/* Messaggio configurazione caricata */}
+          {configLoadedFromStorage && (
+            <Alert severity="success" sx={{ m: 2 }}>
+              ✅ Configurazione caricata automaticamente dal storage locale
+            </Alert>
+          )}
+          
+          {/* Errore caricamento team API */}
+          {apiTeamsError && (
+            <Alert severity="warning" sx={{ m: 2 }}>
+              ⚠️ Errore nel caricamento dei team: {apiTeamsError}
+            </Alert>
+          )}
+          
+          {/* Pulsante per riconfigurare */}
+          <Box sx={{ p: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Box>
+              <Typography variant="h4" color="primary">
+                Fantacalcio Manager
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Configurazione salvata: Gruppo {groupData?.n}, Anno {selectedYear}
+                {selectedTeam && (
+                  <>
+                    <br />
+                    La mia squadra: <strong>{getAvailableTeams().find(t => t.o === selectedTeam)?.n || selectedTeam}</strong>
+                  </>
+                )}
+                {lastApiTeamsUpdate && (
+                  <>
+                    <br />
+                    Ultimo aggiornamento team: <strong>{lastApiTeamsUpdate.toLocaleTimeString()}</strong>
+                  </>
+                )}
+              </Typography>
+            </Box>
+            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+              {/* Controlli Asta Live */}
+              {!auctionConnected ? (
+                <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                  <TextField
+                    label="ID Asta"
+                    variant="outlined"
+                    value={auctionId}
+                    onChange={(e) => setAuctionId(e.target.value)}
+                    size="small"
+                    sx={{ width: 200 }}
+                    placeholder="ID Firebase..."
+                  />
+                  <Button
+                    variant="contained"
+                    onClick={() => connectToAuction(auctionId)}
+                    disabled={!auctionId.trim()}
+                    size="small"
+                    sx={{ 
+                      bgcolor: 'error.main', 
+                      '&:hover': { bgcolor: 'error.dark' },
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    🔴 Connetti Asta
+                  </Button>
+                </Box>
+              ) : (
+                <Button
+                  variant="contained"
+                  color="success"
+                  onClick={disconnectFromAuction}
+                  size="small"
+                  sx={{ whiteSpace: 'nowrap' }}
+                >
+                  ✅ Asta Connessa
+                </Button>
+              )}
+              
+              <Button
+                variant="outlined"
+                onClick={loadApiTeams}
+                disabled={apiTeamsLoading}
+                size="small"
+              >
+                {apiTeamsLoading ? <CircularProgress size={16} /> : 'Aggiorna Team'}
+              </Button>
+              <Button
+                variant="outlined"
+                onClick={() => {
+                  localStorage.removeItem('fantacalcioConfig');
+                  setConfigurationStep('group');
+                  setPlayers([]);
+                  setGroupData(null);
+                  setSelectedLeague('');
+                  setSelectedBasket('');
+                  setSelectedYear('');
+                  setSelectedTeam('');
+                  setGroupId('');
+                  setAuctionId('');
+                  disconnectFromAuction();
+                }}
+              >
+                Riconfigura
+              </Button>
+            </Box>
+          </Box>
         {/* Statistiche Titolari */}
         <Box sx={{ display: 'flex', justifyContent: 'center', gap: 2, mb: 3, pt: 3, flexWrap: 'wrap' }}>
           <Paper elevation={3} sx={{ p: 2, bgcolor: '#e3f2fd', minWidth: 150 }}>
@@ -775,6 +1462,335 @@ function App() {
           </Paper>
         </Box>
 
+        {/* Giocatore in Asta (se connesso) */}
+        {auctionConnected && liveAuction?.currentPlayer && (
+          <Box sx={{ mb: 3 }}>
+            <Paper elevation={3} sx={{ p: 3, bgcolor: '#f8f9fa', border: '2px solid #ff6b35' }}>
+              <Typography variant="h6" sx={{ textAlign: 'center', fontWeight: 700, mb: 2, color: '#ff6b35' }}>
+                🎯 GIOCATORE IN ASTA
+              </Typography>
+              
+              {(() => {
+                const currentPlayerData = getCurrentAuctionPlayerData();
+                if (!currentPlayerData) {
+                  return (
+                    <Typography variant="body1" sx={{ textAlign: 'center', color: 'text.secondary' }}>
+                      Giocatore non trovato nel database: {liveAuction.currentPlayer}
+                    </Typography>
+                  );
+                }
+
+                const { player, auctionData } = currentPlayerData;
+                const apiStatus = getPlayerStatusFromApi(player);
+                const backgroundColor = apiStatus.status === 'mia' ? '#e8f5e8' : 
+                                     apiStatus.status === 'altra' ? '#fff3e0' : '#ffffff';
+
+                return (
+                  <Paper 
+                    elevation={2} 
+                    sx={{ 
+                      p: 2, 
+                      bgcolor: backgroundColor,
+                      border: '2px solid #ff6b35',
+                      borderRadius: 2
+                    }}
+                  >
+                    <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 2 }}>
+                      <Box>
+                        <Typography variant="h5" sx={{ fontWeight: 700, color: '#333' }}>
+                          {player.Nome}
+                        </Typography>
+                        <Typography variant="subtitle1" color="text.secondary">
+                          {player.Squadra} • {player.Ruolo}
+                        </Typography>
+                      </Box>
+                      
+                      <Box sx={{ textAlign: 'center' }}>
+                        <Typography variant="h4" sx={{ fontWeight: 700, color: '#ff6b35' }}>
+                          {auctionData.currentBid || 0}€
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          {auctionData.currentBidder ? `Offerta di: ${auctionData.currentBidder}` : 'Nessuna offerta'}
+                        </Typography>
+                      </Box>
+
+                      <Box sx={{ textAlign: 'right' }}>
+                        <Chip 
+                          label={auctionData.auctionStatus === 'active' ? '🔴 ATTIVA' : 
+                                auctionData.auctionStatus === 'sold' ? '✅ VENDUTO' : 
+                                auctionData.auctionStatus === 'paused' ? '⏸️ PAUSA' : '⏳ ATTESA'}
+                          color={auctionData.auctionStatus === 'active' ? 'error' : 
+                                auctionData.auctionStatus === 'sold' ? 'success' : 'default'}
+                          sx={{ fontWeight: 600, mb: 1 }}
+                        />
+                        {auctionData.timeLeft && (
+                          <Typography variant="body2" color="text.secondary">
+                            Tempo: {auctionData.timeLeft}s
+                          </Typography>
+                        )}
+                      </Box>
+                    </Box>
+
+                    {/* Dati aggiuntivi del giocatore */}
+                    <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid #ddd' }}>
+                      {(() => {
+                        const isTitolarePlayer = isTitolare(player);
+                        const lastYearData = getPlayerLastYearData(player);
+                        const injury = getPlayerInjury(player);
+                        const teamTier = getTeamTier(player.Squadra);
+                        const minIncroci = getMinIncroci(player);
+
+                        return (
+                          <Box>
+                            {/* Prima riga: Info principali */}
+                            <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 2, mb: 2 }}>
+                              <Box sx={{ textAlign: 'center', p: 1, bgcolor: '#f5f5f5', borderRadius: 1 }}>
+                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem', fontWeight: 600 }}>
+                                  MEDIA VOTO
+                                </Typography>
+                                <Typography variant="h6" sx={{ fontWeight: 700, color: 'primary.main' }}>
+                                  {player.Media || '-'}
+                                </Typography>
+                              </Box>
+                              
+                              <Box sx={{ textAlign: 'center', p: 1, bgcolor: '#f5f5f5', borderRadius: 1 }}>
+                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem', fontWeight: 600 }}>
+                                  FANTAMEDIA
+                                </Typography>
+                                <Typography variant="h6" sx={{ fontWeight: 700, color: 'secondary.main' }}>
+                                  {player.FantaMedia || '-'}
+                                </Typography>
+                              </Box>
+
+                              <Box sx={{ textAlign: 'center', p: 1, bgcolor: '#f5f5f5', borderRadius: 1 }}>
+                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem', fontWeight: 600 }}>
+                                  PRESENZE
+                                </Typography>
+                                <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                                  {player.Presenze || '-'}
+                                </Typography>
+                              </Box>
+
+                              <Box sx={{ textAlign: 'center', p: 1, bgcolor: isTitolarePlayer ? '#e8f5e8' : '#ffebee', borderRadius: 1 }}>
+                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem', fontWeight: 600 }}>
+                                  TITOLARE
+                                </Typography>
+                                <Typography variant="h6" sx={{ fontWeight: 700, color: isTitolarePlayer ? 'success.main' : 'error.main' }}>
+                                  {isTitolarePlayer ? '✅ SÌ' : '❌ NO'}
+                                </Typography>
+                              </Box>
+
+                              <Box sx={{ textAlign: 'center', p: 1, bgcolor: '#f5f5f5', borderRadius: 1 }}>
+                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem', fontWeight: 600 }}>
+                                  TIER SQUADRA
+                                </Typography>
+                                <Typography variant="h6" sx={{ fontWeight: 700, color: teamTier <= 2 ? 'success.main' : teamTier <= 3 ? 'warning.main' : 'error.main' }}>
+                                  T{teamTier}
+                                </Typography>
+                              </Box>
+                            </Box>
+
+                            {/* Seconda riga: Statistiche dettagliate */}
+                            <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: 1, mb: 2 }}>
+                              <Box sx={{ textAlign: 'center' }}>
+                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>Goal</Typography>
+                                <Typography variant="body2" sx={{ fontWeight: 600 }}>{player.Goal || '0'}</Typography>
+                              </Box>
+                              <Box sx={{ textAlign: 'center' }}>
+                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>Assist</Typography>
+                                <Typography variant="body2" sx={{ fontWeight: 600 }}>{player.Assist || '0'}</Typography>
+                              </Box>
+                              <Box sx={{ textAlign: 'center' }}>
+                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>MotM</Typography>
+                                <Typography variant="body2" sx={{ fontWeight: 600 }}>{player.MotM || '0'}</Typography>
+                              </Box>
+                              <Box sx={{ textAlign: 'center' }}>
+                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>Gialli</Typography>
+                                <Typography variant="body2" sx={{ fontWeight: 600, color: 'warning.main' }}>{player.Gialli || '0'}</Typography>
+                              </Box>
+                              <Box sx={{ textAlign: 'center' }}>
+                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>Rossi</Typography>
+                                <Typography variant="body2" sx={{ fontWeight: 600, color: 'error.main' }}>{player.Rossi || '0'}</Typography>
+                              </Box>
+                              {player.Ruolo === 'Portiere' && (
+                                <>
+                                  <Box sx={{ textAlign: 'center' }}>
+                                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>Goal Sub.</Typography>
+                                    <Typography variant="body2" sx={{ fontWeight: 600 }}>{player['Goal Subiti'] || '0'}</Typography>
+                                  </Box>
+                                  <Box sx={{ textAlign: 'center' }}>
+                                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>Rig. Par.</Typography>
+                                    <Typography variant="body2" sx={{ fontWeight: 600, color: 'success.main' }}>{player['Rigori Parati'] || '0'}</Typography>
+                                  </Box>
+                                </>
+                              )}
+                              {player.Ruolo !== 'Portiere' && (
+                                <>
+                                  <Box sx={{ textAlign: 'center' }}>
+                                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>Rigori</Typography>
+                                    <Typography variant="body2" sx={{ fontWeight: 600 }}>{player.Rigori || '0'}</Typography>
+                                  </Box>
+                                  <Box sx={{ textAlign: 'center' }}>
+                                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>Rig. Sbag.</Typography>
+                                    <Typography variant="body2" sx={{ fontWeight: 600, color: 'error.main' }}>{player['Rigori Sbagliati'] || '0'}</Typography>
+                                  </Box>
+                                </>
+                              )}
+                            </Box>
+
+                            {/* Terza riga: Dati anno scorso */}
+                            {lastYearData && (
+                              <Box sx={{ mb: 2, p: 2, bgcolor: '#f0f7ff', borderRadius: 1, border: '1px solid #e3f2fd' }}>
+                                <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1, color: 'primary.main' }}>
+                                  📊 STATISTICHE ANNO SCORSO
+                                </Typography>
+                                <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 2 }}>
+                                  <Box sx={{ textAlign: 'center' }}>
+                                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>FANTAMEDIA</Typography>
+                                    <Typography variant="body1" sx={{ fontWeight: 700, color: 'secondary.main' }}>
+                                      {lastYearData.fantamedia}
+                                    </Typography>
+                                  </Box>
+                                  <Box sx={{ textAlign: 'center' }}>
+                                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>PRESENZE</Typography>
+                                    <Typography variant="body1" sx={{ fontWeight: 700 }}>
+                                      {lastYearData.presenze}
+                                    </Typography>
+                                  </Box>
+                                  <Box sx={{ textAlign: 'center' }}>
+                                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
+                                      {lastYearData.ruolo === 'Portiere' ? 'GS/RP/AU/AMM/ESP' : 'GOL/ASS/R+/R-/AMM/ESP'}
+                                    </Typography>
+                                    <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8rem' }}>
+                                      {lastYearData.stats}
+                                    </Typography>
+                                  </Box>
+                                  {lastYearData.hasChangedTeam && (
+                                    <Box sx={{ textAlign: 'center' }}>
+                                      <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>SQUADRA PRECEDENTE</Typography>
+                                      <Typography variant="body2" sx={{ fontWeight: 600, color: 'warning.main' }}>
+                                        🔄 {lastYearData.oldTeam}
+                                      </Typography>
+                                    </Box>
+                                  )}
+                                  {lastYearData.wasTitolare && (
+                                    <Box sx={{ textAlign: 'center' }}>
+                                      <Chip 
+                                        label="🌟 ERA TITOLARE" 
+                                        size="small" 
+                                        color="success" 
+                                        sx={{ fontSize: '0.7rem', fontWeight: 600 }}
+                                      />
+                                    </Box>
+                                  )}
+                                </Box>
+                              </Box>
+                            )}
+
+                            {/* Quarta riga: Info aggiuntive */}
+                            <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 2 }}>
+                              {/* Infortuni */}
+                              {injury && (
+                                <Box sx={{ p: 2, bgcolor: '#ffebee', borderRadius: 1, border: '1px solid #ffcdd2' }}>
+                                  <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1, color: 'error.main' }}>
+                                    🤕 INFORTUNIO
+                                  </Typography>
+                                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                    {injury.tipo}
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary">
+                                    Rientro: {injury.mesi} mesi
+                                  </Typography>
+                                </Box>
+                              )}
+
+                              {/* Incroci migliori */}
+                              {minIncroci.length > 0 && (
+                                <Box sx={{ p: 2, bgcolor: '#e8f5e8', borderRadius: 1, border: '1px solid #c8e6c9' }}>
+                                  <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1, color: 'success.main' }}>
+                                    ⚽ INCROCI MIGLIORI
+                                  </Typography>
+                                  {minIncroci.slice(0, 3).map((incrocio, index) => (
+                                    <Typography key={index} variant="body2" sx={{ fontSize: '0.8rem' }}>
+                                      {incrocio.squadra}: {incrocio.valore}
+                                    </Typography>
+                                  ))}
+                                </Box>
+                              )}
+
+                              {/* Status giocatore */}
+                              {apiStatus.status && (
+                                <Box sx={{ 
+                                  p: 2, 
+                                  bgcolor: apiStatus.status === 'mia' ? '#e8f5e8' : '#fff3e0', 
+                                  borderRadius: 1, 
+                                  border: `1px solid ${apiStatus.status === 'mia' ? '#c8e6c9' : '#ffcc02'}` 
+                                }}>
+                                  <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1, color: apiStatus.status === 'mia' ? 'success.main' : 'warning.main' }}>
+                                    {apiStatus.status === 'mia' ? '✅ MIA SQUADRA' : '⚠️ GIÀ PRESO'}
+                                  </Typography>
+                                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                    Prezzo: {apiStatus.price || 0}€
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary">
+                                    Squadra: {apiStatus.teamName}
+                                  </Typography>
+                                </Box>
+                              )}
+                            </Box>
+                          </Box>
+                        );
+                      })()}
+                    </Box>
+                  </Paper>
+                );
+              })()}
+            </Paper>
+          </Box>
+        )}
+
+        {/* Errori dell'asta */}
+        {auctionError && (
+          <Box sx={{ mb: 3 }}>
+            <Alert severity="error" sx={{ mx: 2 }}>
+              Errore asta: {auctionError}
+            </Alert>
+          </Box>
+        )}
+
+        {/* Legenda Colori */}
+        <Box sx={{ display: 'flex', justifyContent: 'center', mb: 2 }}>
+          <Paper elevation={1} sx={{ p: 2, bgcolor: 'grey.50' }}>
+            <Typography variant="subtitle2" gutterBottom sx={{ fontWeight: 600, textAlign: 'center' }}>
+              Legenda Colori
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <Box sx={{ width: 16, height: 16, bgcolor: '#e8f5e8', border: '1px solid #ccc' }} />
+                <Typography variant="caption">I miei giocatori</Typography>
+              </Box>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <Box sx={{ width: 16, height: 16, bgcolor: '#fff3e0', border: '1px solid #ccc' }} />
+                <Typography variant="caption">Presi da altri</Typography>
+              </Box>
+              {selectedTeam && (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <Box sx={{ width: 16, height: 16, bgcolor: '#e3f2fd', border: '1px solid #ccc' }} />
+                  <Typography variant="caption">Della mia squadra</Typography>
+                </Box>
+              )}
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <Box sx={{ width: 16, height: 16, bgcolor: '#e3fcec', border: '1px solid #ccc' }} />
+                <Typography variant="caption">Titolari</Typography>
+              </Box>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <Box sx={{ width: 16, height: 16, bgcolor: '#ffebee', border: '1px solid #ccc' }} />
+                <Typography variant="caption">Infortunati</Typography>
+              </Box>
+            </Box>
+          </Paper>
+        </Box>
+
         {/* Barra di ricerca e filtri */}
         <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 2, mb: 3, flexWrap: 'wrap' }}>
           <TextField
@@ -887,16 +1903,25 @@ function App() {
                 {sortedPlayers.map((player, idx) => {
                   const minIncroci = getMinIncroci(player);
                   const titolare = isTitolare(player);
-                  const playerKey = getPlayerKey(player);
-                  const status = playerStatus[playerKey];
                   const injury = getPlayerInjury(player);
+                  const isMyTeamPlayer = isPlayerInMyTeam(player);
+                  
+                  // Ottieni lo status dall'API invece che dallo storage locale
+                  const apiStatus = getPlayerStatusFromApi(player);
+                  const status = apiStatus.status;
                   
                   // Determina il colore di sfondo della riga
                   let rowBgColor = {};
                   if (injury) {
                     rowBgColor = { bgcolor: '#ffebee' }; // Sfondo rosso chiaro per infortunati
+                  } else if (status === 'mia') {
+                    rowBgColor = { bgcolor: '#e8f5e8' }; // Sfondo verde per i miei giocatori
+                  } else if (status === 'altra') {
+                    rowBgColor = { bgcolor: '#fff3e0' }; // Sfondo arancione per giocatori di altre squadre
+                  } else if (isMyTeamPlayer) {
+                    rowBgColor = { bgcolor: '#e3f2fd' }; // Sfondo azzurro per giocatori della mia squadra
                   } else if (titolare) {
-                    rowBgColor = { bgcolor: '#e3fcec' }; // Sfondo verde per titolari
+                    rowBgColor = { bgcolor: '#e3fcec' }; // Sfondo verde chiaro per titolari
                   }
                   
                   return (
@@ -1000,42 +2025,41 @@ function App() {
                               <Chip 
                                 label="Mia squadra" 
                                 color="primary" 
-                                size="small" 
-                                onClick={() => removePlayerAssignment(playerKey)}
-                                sx={{ cursor: 'pointer' }}
+                                size="small"
                               />
                               <Typography variant="caption" sx={{ fontSize: 10, color: 'success.main', fontWeight: 600 }}>
-                                {playerPrices[playerKey] || 0} crediti
+                                {apiStatus.price || 0} crediti
                               </Typography>
+                              {apiStatus.teamName && (
+                                <Typography variant="caption" sx={{ fontSize: 9, color: 'text.secondary' }}>
+                                  {apiStatus.teamName}
+                                </Typography>
+                              )}
                             </Box>
                           ) : status === 'altra' ? (
-                            <Chip 
-                              label="Altra squadra" 
-                              color="secondary" 
-                              size="small" 
-                              onClick={() => removePlayerAssignment(playerKey)}
-                              sx={{ cursor: 'pointer' }}
-                            />
+                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                              <Chip 
+                                label="Altra squadra" 
+                                color="secondary" 
+                                size="small"
+                              />
+                              <Typography variant="caption" sx={{ fontSize: 10, color: 'warning.main', fontWeight: 600 }}>
+                                {apiStatus.price || 0} crediti
+                              </Typography>
+                              {apiStatus.teamName && (
+                                <Typography variant="caption" sx={{ fontSize: 9, color: 'text.secondary' }}>
+                                  {apiStatus.teamName}
+                                </Typography>
+                              )}
+                            </Box>
                           ) : (
                             <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-                              <Button 
-                                size="small" 
-                                variant="contained" 
-                                color="primary"
-                                onClick={() => assignToMyTeam(playerKey)}
-                                sx={{ fontSize: 10, minWidth: 'auto', px: 1 }}
-                              >
-                                Mia
-                              </Button>
-                              <Button 
-                                size="small" 
-                                variant="outlined" 
-                                color="secondary"
-                                onClick={() => assignToOtherTeam(playerKey)}
-                                sx={{ fontSize: 10, minWidth: 'auto', px: 1 }}
-                              >
-                                Altra
-                              </Button>
+                              <Chip 
+                                label="Libero" 
+                                variant="outlined"
+                                size="small"
+                                color="default"
+                              />
                             </Box>
                           )}
                         </TableCell>
@@ -1106,7 +2130,8 @@ function App() {
             ))}
           </List>
         </Popover>
-      </Box>
+        </Box>
+      )}
     </Box>
   );
 }

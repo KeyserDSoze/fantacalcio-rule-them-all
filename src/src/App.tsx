@@ -947,6 +947,42 @@ function App() {
     );
   }
 
+  // Funzione per verificare se ci sono ancora titolari liberi di una squadra per un ruolo
+  function getFreeTitolariByTeamAndRole(teamName: string, role: string): number {
+    if (!teamName || !role) return 0;
+    
+    // Trova tutti i titolari di quella squadra e ruolo
+    const titolariOfTeamAndRole = titolari.filter(t => 
+      t['Squadra'] && 
+      t['Squadra'].toLowerCase().trim() === teamName.toLowerCase().trim()
+    ).filter(titolare => {
+      // Trova il giocatore corrispondente per verificare il ruolo
+      const player = players.find(p => 
+        p.Nome.toLowerCase().trim() === titolare['Nome Giocatore']?.toLowerCase().trim() && 
+        p.Squadra.toLowerCase().trim() === titolare['Squadra']?.toLowerCase().trim()
+      );
+      return player && player.Ruolo === role;
+    });
+
+    // Conta quanti di questi sono ancora liberi
+    let freeTitolari = 0;
+    titolariOfTeamAndRole.forEach(titolare => {
+      const player = players.find(p => 
+        p.Nome.toLowerCase().trim() === titolare['Nome Giocatore']?.toLowerCase().trim() && 
+        p.Squadra.toLowerCase().trim() === titolare['Squadra']?.toLowerCase().trim()
+      );
+      
+      if (player) {
+        const apiStatus = getPlayerStatusFromApi(player);
+        if (apiStatus.status === null) { // Giocatore libero
+          freeTitolari++;
+        }
+      }
+    });
+
+    return freeTitolari;
+  }
+
   function getMinIncroci(player: Player) {
     if (!player || !player.Squadra || !incroci.length) return [];
     const squadra = player.Squadra;
@@ -1707,14 +1743,61 @@ function App() {
                               {/* Incroci migliori */}
                               {minIncroci.length > 0 && (
                                 <Box sx={{ p: 2, bgcolor: '#e8f5e8', borderRadius: 1, border: '1px solid #c8e6c9' }}>
-                                  <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1, color: 'success.main' }}>
+                                  <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1, color: 'success.main', textAlign: 'center' }}>
                                     ⚽ INCROCI MIGLIORI
                                   </Typography>
-                                  {minIncroci.slice(0, 3).map((incrocio, index) => (
-                                    <Typography key={index} variant="body2" sx={{ fontSize: '0.8rem' }}>
-                                      {incrocio.squadra}: {incrocio.valore}
-                                    </Typography>
-                                  ))}
+                                  <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                                    {minIncroci.slice(0, 3).map((incrocio, index) => {
+                                      const freeTitolari = getFreeTitolariByTeamAndRole(incrocio.squadra, player.Ruolo);
+                                      const hasFreeTitolari = freeTitolari > 0;
+                                      
+                                      return (
+                                        <Box key={index} sx={{ 
+                                          display: 'flex', 
+                                          justifyContent: 'center', 
+                                          alignItems: 'center', 
+                                          gap: 1,
+                                          width: '100%',
+                                          minHeight: '24px'
+                                        }}>
+                                          <Typography 
+                                            variant="body2" 
+                                            sx={{ 
+                                              fontSize: hasFreeTitolari ? '0.85rem' : '0.7rem',
+                                              fontWeight: hasFreeTitolari ? 700 : 400,
+                                              color: hasFreeTitolari ? 'success.dark' : 'text.secondary',
+                                              textAlign: 'center',
+                                              minWidth: '80px'
+                                            }}
+                                          >
+                                            {incrocio.squadra}: {incrocio.valore}
+                                          </Typography>
+                                          {hasFreeTitolari && (
+                                            <Chip 
+                                              label={`${freeTitolari} liberi`}
+                                              size="small"
+                                              color="success"
+                                              sx={{ 
+                                                fontSize: '0.6rem', 
+                                                height: '18px',
+                                                '& .MuiChip-label': { px: 1 }
+                                              }}
+                                            />
+                                          )}
+                                          {!hasFreeTitolari && (
+                                            <Typography variant="caption" sx={{ 
+                                              fontSize: '0.6rem', 
+                                              color: 'text.disabled',
+                                              textAlign: 'center',
+                                              minWidth: '60px'
+                                            }}>
+                                              tutti presi
+                                            </Typography>
+                                          )}
+                                        </Box>
+                                      );
+                                    })}
+                                  </Box>
                                 </Box>
                               )}
 

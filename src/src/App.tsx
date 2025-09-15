@@ -1,5 +1,5 @@
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import './App.css';
 import {
   Box,
@@ -106,6 +106,8 @@ function App() {
   const [liveAuction, setLiveAuction] = useState<LiveAuction | null>(null);
   const [auctionConnected, setAuctionConnected] = useState<boolean>(false);
   const [auctionError, setAuctionError] = useState<string | null>(null);
+  const [previousAuctionPlayer, setPreviousAuctionPlayer] = useState<string | null>(null);
+  const [forceUpdate, setForceUpdate] = useState<number>(0); // Per forzare re-render
 
   // Funzione per caricare i dati dei team dall'API
   const loadApiTeams = async () => {
@@ -118,8 +120,14 @@ function App() {
 
     try {
       const teams = await getTeams();
+      console.log('📊 Team data loaded:', teams.length, 'teams');
       setApiTeams(teams);
       setLastApiTeamsUpdate(new Date());
+      
+      // Forza il re-render di tutti i componenti che dipendono da apiTeams
+      setForceUpdate(prev => prev + 1);
+      console.log('🔄 Force update triggered - UI should refresh now');
+      
     } catch (err: any) {
       setApiTeamsError(`Errore nel caricamento dei team: ${err.message}`);
       console.error('Errore loadApiTeams:', err);
@@ -192,9 +200,49 @@ function App() {
       // Crea un listener per l'asta su Firestore
       const auctionRef = doc(db, 'aste', auctionIdToConnect.trim());
       
-      const unsubscribe: Unsubscribe = onSnapshot(auctionRef, (docSnapshot) => {
+      const unsubscribe: Unsubscribe = onSnapshot(auctionRef, async (docSnapshot) => {
         if (docSnapshot.exists()) {
           const auctionData = docSnapshot.data();
+          console.log('🔥 Auction data received:', auctionData);
+          
+          // Estrai il nome del giocatore in diversi modi possibili
+          let currentPlayerName = null;
+          if (auctionData.currentPlayer) {
+            // Se è un oggetto
+            if (typeof auctionData.currentPlayer === 'object') {
+              currentPlayerName = auctionData.currentPlayer.nome || 
+                                 auctionData.currentPlayer.name || 
+                                 auctionData.currentPlayer.playerName ||
+                                 JSON.stringify(auctionData.currentPlayer);
+            } else {
+              // Se è una stringa
+              currentPlayerName = auctionData.currentPlayer;
+            }
+          }
+          
+          console.log('🎯 Current player name extracted:', currentPlayerName);
+          console.log('🔄 Previous player name:', previousAuctionPlayer);
+          
+          // Controlla se il giocatore è cambiato (anche la prima volta)
+          if (currentPlayerName && currentPlayerName !== previousAuctionPlayer) {
+            console.log(`� CAMBIO GIOCATORE RILEVATO!`);
+            console.log(`   Da: "${previousAuctionPlayer || 'NESSUNO'}"`);
+            console.log(`   A:  "${currentPlayerName}"`);
+            
+            // Aggiorna i dati dei team quando cambia il giocatore
+            console.log('📊 Avvio aggiornamento team...');
+            try {
+              await loadApiTeams();
+              console.log('✅ Team aggiornati con successo!');
+            } catch (error) {
+              console.error('❌ Errore nell\'aggiornamento dei team:', error);
+            }
+            
+            // Aggiorna lo stato del giocatore precedente
+            setPreviousAuctionPlayer(currentPlayerName);
+          } else {
+            console.log('ℹ️ Nessun cambio giocatore rilevato');
+          }
           
           setLiveAuction({
             id: auctionIdToConnect,
@@ -234,6 +282,7 @@ function App() {
     setAuctionConnected(false);
     setAuctionError(null);
     setAuctionId('');
+    setPreviousAuctionPlayer(null); // Reset del giocatore precedente
     
     // Salva la configurazione senza ID asta
     if (groupData) {
@@ -701,8 +750,13 @@ function App() {
 
   const stats = getStatsForRole(selectedRole);
 
-  // Calcola le statistiche dei giocatori presi da me
-  const getMyTeamStats = () => {
+  // Calcola le statistiche dei giocatori presi da me - memoizzato per performance e aggiornamento automatico
+  const myTeamStats = useMemo(() => {
+    console.log('🔄 Recalculating my team stats', { 
+      playersCount: players.length, 
+      apiTeamsCount: apiTeams.length 
+    });
+    
     const myPlayers = players.filter(player => {
       // Usa l'API per ottenere lo status invece del localStorage
       const apiStatus = getPlayerStatusFromApi(player);
@@ -757,12 +811,15 @@ function App() {
       attaccantiTiers: formatTierStats(roleStats.Attaccante.tiers),
       totaleTiers: formatTierStats(totalTiers)
     };
-  };
+  }, [players, apiTeams, forceUpdate]); // Dipende da apiTeams per aggiornarsi automaticamente
 
-  const myTeamStats = getMyTeamStats();
-
-  // Calcola le statistiche dei crediti
-  const getCreditStats = () => {
+  // Calcola le statistiche dei crediti - memoizzato per performance e aggiornamento automatico
+  const creditStats = useMemo(() => {
+    console.log('🔄 Recalculating credit stats', { 
+      playersCount: players.length, 
+      apiTeamsCount: apiTeams.length 
+    });
+    
     const myPlayers = players.filter(player => {
       // Usa l'API per ottenere lo status invece del localStorage
       const apiStatus = getPlayerStatusFromApi(player);
@@ -797,9 +854,7 @@ function App() {
       remainingCredits,
       spentByRole
     };
-  };
-
-  const creditStats = getCreditStats();
+  }, [players, apiTeams, totalCredits, forceUpdate]); // Dipende da apiTeams per aggiornarsi automaticamente
 
   // Funzione per gestire l'ordinamento
   const handleSort = (field: string) => {
@@ -935,7 +990,18 @@ function App() {
     }
     
     setFiltered(filteredPlayers);
-  }, [search, players, selectedRole, showOnlyFree, showOnlyTitolari, apiTeams]); // Cambiato playerStatus con apiTeams
+  }, [search, players, selectedRole, showOnlyFree, showOnlyTitolari, apiTeams, forceUpdate]); // Aggiungiamo forceUpdate
+
+  // Effetto per forzare il ricalcolo di tutti i componenti quando cambiano i team
+  useEffect(() => {
+    console.log('🔄 Force update triggered - recalculating all components', { 
+      apiTeamsCount: apiTeams.length, 
+      forceUpdate 
+    });
+    
+    // Questo effetto triggera automaticamente il ricalcolo di tutti gli altri useEffect
+    // che dipendono da apiTeams
+  }, [apiTeams, forceUpdate]);
 
   function isTitolare(player: Player) {
     return titolari.some(
@@ -1268,8 +1334,9 @@ function App() {
                 onClick={loadApiTeams}
                 disabled={apiTeamsLoading}
                 size="small"
+                title={auctionConnected ? "I team si aggiornano automaticamente ad ogni cambio giocatore in asta" : "Aggiorna manualmente i dati dei team"}
               >
-                {apiTeamsLoading ? <CircularProgress size={16} /> : 'Aggiorna Team'}
+                {apiTeamsLoading ? <CircularProgress size={16} /> : auctionConnected ? '🔄 Auto-Sync' : 'Aggiorna Team'}
               </Button>
               <Button
                 variant="outlined"

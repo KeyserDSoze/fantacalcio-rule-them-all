@@ -1063,6 +1063,136 @@ function App() {
     return (values as { squadra: string; valore: number }[]).sort((a, b) => a.valore - b.valore).slice(0, 3);
   }
 
+  // Funzione per analizzare gli incroci ottimali per ogni ruolo basata sui giocatori già presi
+  function getOptimalCrossesForRole(role: string) {
+    if (!incroci.length || !players.length) return [];
+    
+    // Ottieni i giocatori del ruolo già presi dalla mia squadra
+    const myPlayersInRole = players.filter(player => {
+      const apiStatus = getPlayerStatusFromApi(player);
+      return apiStatus.status === 'mia' && player.Ruolo === role;
+    });
+
+    if (myPlayersInRole.length === 0) {
+      return []; // Se non ho giocatori in questo ruolo, non posso calcolare incroci
+    }
+
+    // Per ogni squadra, calcola la media degli incroci con le squadre dei miei giocatori
+    const teamAnalysis: Array<{
+      squadra: string;
+      avgIncroci: number;
+      maxIncroci: number;
+      minIncroci: number;
+      incrociFacts: string[];
+      availableTitolari: number;
+      titolariNames: string[];
+    }> = [];
+
+    // Ottieni tutte le squadre possibili (escludendo quelle dei miei giocatori per evitare duplicati)
+    const myTeams = new Set(myPlayersInRole.map(p => p.Squadra));
+    const allTeams = incrociHeader.filter(h => h !== 'Nome' && !myTeams.has(h));
+
+    allTeams.forEach(targetTeam => {
+      const incroceValues: number[] = [];
+      const incrociFacts: string[] = [];
+
+      // Per ogni mio giocatore nel ruolo, calcola l'incrocio con la squadra target
+      myPlayersInRole.forEach(myPlayer => {
+        const myTeam = myPlayer.Squadra;
+        const incrociRow = incroci.find(r => r['Nome'] === myTeam);
+        
+        if (incrociRow && incrociRow[targetTeam] !== undefined && incrociRow[targetTeam] !== '') {
+          const incroceValue = Number(incrociRow[targetTeam]);
+          if (!isNaN(incroceValue)) {
+            incroceValues.push(incroceValue);
+            incrociFacts.push(`${myPlayer.Nome} (${myTeam}): ${incroceValue}`);
+          }
+        }
+      });
+
+      if (incroceValues.length > 0) {
+        // Conta i titolari disponibili di quella squadra nel ruolo
+        const availableTitolari = players.filter(player => {
+          const apiStatus = getPlayerStatusFromApi(player);
+          return player.Squadra === targetTeam && 
+                 player.Ruolo === role && 
+                 apiStatus.status === null && // Non ancora preso
+                 isTitolare(player); // È titolare
+        });
+
+        if (availableTitolari.length > 0) {
+          const avgIncroci = incroceValues.reduce((sum, val) => sum + val, 0) / incroceValues.length;
+          const maxIncroci = Math.max(...incroceValues);
+          const minIncroci = Math.min(...incroceValues);
+
+          teamAnalysis.push({
+            squadra: targetTeam,
+            avgIncroci: Math.round(avgIncroci * 10) / 10, // Arrotonda a 1 decimale
+            maxIncroci,
+            minIncroci,
+            incrociFacts,
+            availableTitolari: availableTitolari.length,
+            titolariNames: availableTitolari.map(p => p.Nome)
+          });
+        }
+      }
+    });
+
+    // Ordina per media incroci crescente (i migliori incroci hanno valori bassi)
+    return teamAnalysis.sort((a, b) => a.avgIncroci - b.avgIncroci).slice(0, 5); // Top 5
+  }
+
+  // Funzione per verificare se un giocatore è "papabile" per gli incroci favorevoli
+  function isPlayerOptimalForCrosses(player: Player): { isPapabile: boolean; avgIncroci?: number; details?: string } {
+    if (!player || !player.Squadra || !player.Ruolo || !incroci.length) {
+      return { isPapabile: false };
+    }
+
+    // Ottieni i giocatori del mio team nello stesso ruolo
+    const myPlayersInRole = players.filter(p => {
+      const apiStatus = getPlayerStatusFromApi(p);
+      return apiStatus.status === 'mia' && p.Ruolo === player.Ruolo;
+    });
+
+    if (myPlayersInRole.length === 0) {
+      return { isPapabile: false }; // Non ho giocatori in questo ruolo
+    }
+
+    // Calcola la media degli incroci con i miei giocatori
+    const incroceValues: number[] = [];
+    const myTeams = myPlayersInRole.map(p => p.Squadra);
+
+    myPlayersInRole.forEach(myPlayer => {
+      const myTeam = myPlayer.Squadra;
+      const incrociRow = incroci.find(r => r['Nome'] === myTeam);
+      
+      if (incrociRow && incrociRow[player.Squadra] !== undefined && incrociRow[player.Squadra] !== '') {
+        const incroceValue = Number(incrociRow[player.Squadra]);
+        if (!isNaN(incroceValue)) {
+          incroceValues.push(incroceValue);
+        }
+      }
+    });
+
+    if (incroceValues.length === 0) {
+      return { isPapabile: false };
+    }
+
+    const avgIncroci = incroceValues.reduce((sum, val) => sum + val, 0) / incroceValues.length;
+    const roundedAvg = Math.round(avgIncroci * 10) / 10;
+    
+    // Considera "papabile" se la media incroci è <= 8 (soglia ragionevole)
+    const isPapabile = avgIncroci <= 8;
+    
+    const details = `Media incroci: ${roundedAvg} (con ${myTeams.join(', ')})`;
+
+    return {
+      isPapabile,
+      avgIncroci: roundedAvg,
+      details
+    };
+  }
+
   return (
     <Box sx={{ bgcolor: '#f5f5f5ff', minHeight: '80vh', width: '100%'  }}>
       {/* Interfaccia di Configurazione */}
@@ -1565,6 +1695,81 @@ function App() {
           </Paper>
         </Box>
 
+        {/* Analisi Incroci Ottimali per Ruolo */}
+        {myTeamStats.totalePlayers > 0 && (
+          <Box sx={{ mb: 3 }}>
+            <Paper elevation={3} sx={{ p: 3 }}>
+              <Typography variant="h6" gutterBottom color="primary" sx={{ fontWeight: 700, mb: 2 }}>
+                🎯 Incroci Ottimali per Ruolo
+              </Typography>
+              
+              <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 2 }}>
+                {['Portiere', 'Difensore', 'Centrocampista', 'Attaccante'].map(role => {
+                  const optimalCrosses = getOptimalCrossesForRole(role);
+                  
+                  if (optimalCrosses.length === 0) {
+                    return (
+                      <Paper key={role} elevation={1} sx={{ p: 2, bgcolor: '#f9f9f9' }}>
+                        <Typography variant="subtitle2" color="text.secondary" sx={{ fontWeight: 600, mb: 1 }}>
+                          {role}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          Nessun giocatore in squadra
+                        </Typography>
+                      </Paper>
+                    );
+                  }
+
+                  return (
+                    <Paper key={role} elevation={1} sx={{ p: 2 }}>
+                      <Typography variant="subtitle2" color="primary" sx={{ fontWeight: 600, mb: 1 }}>
+                        {role}
+                      </Typography>
+                      
+                      {optimalCrosses.slice(0, 3).map((cross, index) => (
+                        <Box key={cross.squadra} sx={{ mb: 1, p: 1, bgcolor: index === 0 ? '#e8f5e8' : '#f5f5f5', borderRadius: 1 }}>
+                          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                              {cross.squadra}
+                            </Typography>
+                            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                              <Chip 
+                                label={`Media: ${cross.avgIncroci}`} 
+                                size="small" 
+                                color={cross.avgIncroci <= 5 ? 'success' : cross.avgIncroci <= 10 ? 'warning' : 'error'} 
+                                variant="outlined"
+                              />
+                              <Chip 
+                                label={`${cross.availableTitolari} titolari`} 
+                                size="small" 
+                                color="primary" 
+                                variant="filled"
+                              />
+                            </Box>
+                          </Box>
+                          
+                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                            Range: {cross.minIncroci}-{cross.maxIncroci} | 
+                            Titolari: {cross.titolariNames.slice(0, 3).join(', ')}
+                            {cross.titolariNames.length > 3 && ` (+${cross.titolariNames.length - 3})`}
+                          </Typography>
+                          
+                          {cross.incrociFacts.length > 0 && (
+                            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, fontStyle: 'italic' }}>
+                              {cross.incrociFacts.slice(0, 2).join(', ')}
+                              {cross.incrociFacts.length > 2 && '...'}
+                            </Typography>
+                          )}
+                        </Box>
+                      ))}
+                    </Paper>
+                  );
+                })}
+              </Box>
+            </Paper>
+          </Box>
+        )}
+
         {/* Giocatore in Asta (se connesso) */}
         {auctionConnected && liveAuction?.currentPlayer && (
           <Box sx={{ mb: 3 }}>
@@ -1638,6 +1843,7 @@ function App() {
                     <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid #ddd' }}>
                       {(() => {
                         const isTitolarePlayer = isTitolare(player);
+                        const crossesInfo = isPlayerOptimalForCrosses(player);
                         const lastYearData = getPlayerLastYearData(player);
                         const injury = getPlayerInjury(player);
                         const teamTier = getTeamTier(player.Squadra);
@@ -1681,7 +1887,55 @@ function App() {
                                 <Typography variant="h6" sx={{ fontWeight: 700, color: isTitolarePlayer ? 'success.main' : 'error.main' }}>
                                   {isTitolarePlayer ? '✅ SÌ' : '❌ NO'}
                                 </Typography>
+                                {crossesInfo.isPapabile ? (
+                                  <Typography variant="caption" sx={{ 
+                                    display: 'block', 
+                                    color: 'primary.main', 
+                                    fontWeight: 600, 
+                                    fontSize: '0.65rem',
+                                    mt: 0.5
+                                  }}>
+                                    🎯 PAPABILE
+                                  </Typography>
+                                ) : crossesInfo.avgIncroci !== undefined ? (
+                                  <Typography variant="caption" sx={{ 
+                                    display: 'block', 
+                                    color: 'warning.main', 
+                                    fontWeight: 600, 
+                                    fontSize: '0.65rem',
+                                    mt: 0.5
+                                  }}>
+                                    ⚠️ INCROCI ALTI
+                                  </Typography>
+                                ) : null}
                               </Box>
+
+                              {/* Box per gli incroci - sempre visibile se ci sono dati */}
+                              {crossesInfo.avgIncroci !== undefined && (
+                                <Box sx={{ 
+                                  textAlign: 'center', 
+                                  p: 1, 
+                                  bgcolor: crossesInfo.isPapabile ? '#e3f2fd' : '#fff3e0', 
+                                  borderRadius: 1 
+                                }}>
+                                  <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem', fontWeight: 600 }}>
+                                    INCROCI
+                                  </Typography>
+                                  <Typography variant="h6" sx={{ 
+                                    fontWeight: 700, 
+                                    color: crossesInfo.isPapabile ? 'primary.main' : 'warning.main' 
+                                  }}>
+                                    {crossesInfo.isPapabile ? '⭐' : '⚠️'} {crossesInfo.avgIncroci}
+                                  </Typography>
+                                  <Typography variant="caption" sx={{ 
+                                    display: 'block', 
+                                    color: 'text.secondary', 
+                                    fontSize: '0.6rem' 
+                                  }}>
+                                    {crossesInfo.isPapabile ? 'Buoni incroci!' : 'Incroci elevati'}
+                                  </Typography>
+                                </Box>
+                              )}
 
                               <Box sx={{ textAlign: 'center', p: 1, bgcolor: '#f5f5f5', borderRadius: 1 }}>
                                 <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem', fontWeight: 600 }}>
@@ -1865,6 +2119,56 @@ function App() {
                                       );
                                     })}
                                   </Box>
+                                </Box>
+                              )}
+
+                              {/* Incroci con i miei giocatori */}
+                              {crossesInfo.avgIncroci !== undefined && (
+                                <Box sx={{ 
+                                  p: 2, 
+                                  bgcolor: crossesInfo.isPapabile ? '#e3f2fd' : '#fff8e1', 
+                                  borderRadius: 1, 
+                                  border: `1px solid ${crossesInfo.isPapabile ? '#2196f3' : '#ff9800'}` 
+                                }}>
+                                  <Typography variant="subtitle2" sx={{ 
+                                    fontWeight: 700, 
+                                    mb: 1, 
+                                    color: crossesInfo.isPapabile ? 'primary.main' : 'warning.main',
+                                    textAlign: 'center' 
+                                  }}>
+                                    {crossesInfo.isPapabile ? '🎯 INCROCI CON I TUOI' : '⚠️ INCROCI CON I TUOI'}
+                                  </Typography>
+                                  
+                                  <Box sx={{ display: 'flex', justifyContent: 'center', mb: 1 }}>
+                                    <Chip 
+                                      label={`Media: ${crossesInfo.avgIncroci}`}
+                                      color={crossesInfo.isPapabile ? 'primary' : 'warning'}
+                                      size="small"
+                                      sx={{ fontWeight: 600 }}
+                                    />
+                                  </Box>
+                                  
+                                  <Typography variant="caption" color="text.secondary" sx={{ 
+                                    display: 'block', 
+                                    textAlign: 'center',
+                                    fontSize: '0.75rem'
+                                  }}>
+                                    {crossesInfo.details}
+                                  </Typography>
+                                  
+                                  <Typography variant="caption" sx={{ 
+                                    display: 'block', 
+                                    textAlign: 'center',
+                                    fontSize: '0.7rem',
+                                    mt: 0.5,
+                                    fontWeight: 600,
+                                    color: crossesInfo.isPapabile ? 'success.main' : 'warning.main'
+                                  }}>
+                                    {crossesInfo.isPapabile ? 
+                                      '✅ Buoni incroci! Giocatore consigliato per il tuo team' : 
+                                      '⚠️ Incroci elevati, valuta attentamente'
+                                    }
+                                  </Typography>
                                 </Box>
                               )}
 

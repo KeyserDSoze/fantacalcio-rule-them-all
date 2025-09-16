@@ -112,6 +112,12 @@ function App() {
   // Funzione per caricare i dati dei team dall'API
   const loadApiTeams = async () => {
     if (!groupData || !selectedLeague || !selectedBasket || !selectedYear) {
+      console.log('⚠️ Dati di configurazione mancanti per loadApiTeams:', {
+        groupData: !!groupData,
+        selectedLeague: !!selectedLeague,
+        selectedBasket: !!selectedBasket,
+        selectedYear: !!selectedYear
+      });
       return;
     }
 
@@ -119,6 +125,7 @@ function App() {
     setApiTeamsError(null);
 
     try {
+      console.log('🔄 Chiamata API getTeams in corso...');
       const teams = await getTeams();
       console.log('📊 Team data loaded:', teams.length, 'teams');
       setApiTeams(teams);
@@ -129,8 +136,9 @@ function App() {
       console.log('🔄 Force update triggered - UI should refresh now');
       
     } catch (err: any) {
-      setApiTeamsError(`Errore nel caricamento dei team: ${err.message}`);
-      console.error('Errore loadApiTeams:', err);
+      const errorMsg = `Errore nel caricamento dei team: ${err.message}`;
+      setApiTeamsError(errorMsg);
+      console.error('❌ Errore loadApiTeams:', err);
     } finally {
       setApiTeamsLoading(false);
     }
@@ -230,12 +238,16 @@ function App() {
             console.log(`   A:  "${currentPlayerName}"`);
             
             // Aggiorna i dati dei team quando cambia il giocatore
-            console.log('📊 Avvio aggiornamento team...');
-            try {
-              await loadApiTeams();
-              console.log('✅ Team aggiornati con successo!');
-            } catch (error) {
-              console.error('❌ Errore nell\'aggiornamento dei team:', error);
+            if (configurationStep !== 'ready') {
+              console.log('⚠️ App non ancora pronta per auto-sync, saltando aggiornamento');
+            } else {
+              console.log('📊 Avvio AUTO-SYNC aggiornamento team...');
+              try {
+                await loadApiTeams();
+                console.log('✅ AUTO-SYNC completato con successo!');
+              } catch (error) {
+                console.error('❌ Errore nell\'AUTO-SYNC:', error);
+              }
             }
             
             // Aggiorna lo stato del giocatore precedente
@@ -901,7 +913,8 @@ function App() {
       basketId: selectedBasket,
       year: selectedYear,
       teamOwner: selectedTeam,
-      auctionId: auctionId
+      auctionId: auctionId,
+      auctionConnected: auctionConnected  // Salva anche lo stato della connessione asta
     };
     localStorage.setItem('fantacalcioConfig', JSON.stringify(config));
   };
@@ -945,6 +958,24 @@ function App() {
       setConfigurationStep('ready');
       setError(null);
       setConfigLoadedFromStorage(true);
+      
+      // Ripristina l'asta se era configurata (DOPO che tutto è pronto)
+      if (config.auctionId) {
+        setAuctionId(config.auctionId);
+        
+        // Se era connessa, riconnetti automaticamente
+        if (config.auctionConnected) {
+          console.log('🔄 Tentativo di riconnessione automatica all\'asta:', config.auctionId);
+          setTimeout(() => {
+            try {
+              connectToAuction(config.auctionId);
+              console.log('✅ Riconnessione automatica completata');
+            } catch (error) {
+              console.error('❌ Errore nella riconnessione automatica:', error);
+            }
+          }, 1000); // Aspetta 1 secondo per essere sicuri che tutto sia pronto
+        }
+      }
       
       // Nascondi il messaggio dopo 5 secondi
       setTimeout(() => {
@@ -1391,6 +1422,35 @@ function App() {
             </Alert>
           )}
           
+          {/* Banner Auto-Sync Attivo */}
+          {auctionConnected && (
+            <Alert 
+              severity="info" 
+              sx={{ 
+                m: 2, 
+                bgcolor: '#e3f2fd', 
+                border: '2px solid #2196f3',
+                '& .MuiAlert-icon': {
+                  color: '#2196f3'
+                }
+              }}
+            >
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Typography sx={{ fontWeight: 600, color: '#1976d2' }}>
+                  🔄 AUTO-SYNC ATTIVO
+                </Typography>
+                <Typography sx={{ color: '#1976d2' }}>
+                  • I team si aggiornano automaticamente ad ogni cambio giocatore in asta
+                </Typography>
+                {liveAuction?.currentPlayer && (
+                  <Typography sx={{ color: '#1976d2', fontWeight: 600, ml: 1 }}>
+                    • Giocatore corrente: {liveAuction.currentPlayer}
+                  </Typography>
+                )}
+              </Box>
+            </Alert>
+          )}
+          
           {/* Errore caricamento team API */}
           {apiTeamsError && (
             <Alert severity="warning" sx={{ m: 2 }}>
@@ -1453,9 +1513,17 @@ function App() {
                   color="success"
                   onClick={disconnectFromAuction}
                   size="small"
-                  sx={{ whiteSpace: 'nowrap' }}
+                  sx={{ 
+                    whiteSpace: 'nowrap',
+                    animation: 'pulse 2s infinite',
+                    '@keyframes pulse': {
+                      '0%': { boxShadow: '0 0 0 0 rgba(76, 175, 80, 0.7)' },
+                      '70%': { boxShadow: '0 0 0 10px rgba(76, 175, 80, 0)' },
+                      '100%': { boxShadow: '0 0 0 0 rgba(76, 175, 80, 0)' }
+                    }
+                  }}
                 >
-                  ✅ Asta Connessa
+                  🔄 Asta Auto-Sync
                 </Button>
               )}
               
